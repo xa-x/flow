@@ -1,26 +1,49 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0d0e12;
+  --foreground: #e8e9ee;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  height: 100%;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* React Flow dark tweaks */
+.react-flow__edge-path {
+  stroke: #3a3f4d;
+  stroke-width: 1.6;
+}
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #c9a227;
+}
+.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid #0d0e12;
+  transition: transform 0.12s ease;
+}
+.react-flow__handle:hover {
+  transform: scale(1.35);
+}
+.react-flow__handle-connecting {
+  box-shadow: 0 0 0 3px #c9a22733;
+}
+.react-flow__connection-path {
+  stroke: #c9a227;
+  stroke-width: 1.8;
+  stroke-dasharray: 4 3;
+}
+
+/* thin scrollbars inside nodes / palette */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2c303b transparent;
 }
