@@ -4,6 +4,24 @@ export type NodeOutput =
   | { type: "audio"; artifactId?: string; url?: string }
   | { type: "video"; artifactId?: string; url?: string };
 
+export type ProviderId = string; // "openrouter" | "pyk" | any custom gateway id
+
+/** Per-provider credentials, stored in the client's Settings. */
+export interface ProviderConfig {
+  baseUrl?: string;
+  apiKey?: string;
+}
+
+export interface RunSettings {
+  providers: Record<ProviderId, ProviderConfig>;
+}
+
+/** Which provider/model a node runs with (persisted per node). */
+export interface ModelRef {
+  provider: ProviderId;
+  model: string;
+}
+
 /** React Flow node.data payload — shared by canvas and engine. */
 export interface NodeData {
   [key: string]: unknown;
@@ -11,8 +29,10 @@ export interface NodeData {
   label?: string;
   text?: string; // text/note node body
   prompt?: string; // llm/image/video instruction
-  model?: string; // OpenRouter model id
+  model?: string; // model id
+  provider?: ProviderId; // provider id (registry)
   voice?: string; // tts voice
+  temperature?: number;
   artifactId?: string; // uploaded media
   // runtime decoration (not persisted into node defs):
   status?: "idle" | "queued" | "running" | "done" | "error";
@@ -37,10 +57,47 @@ export interface GraphDoc {
   viewport?: { x: number; y: number; zoom: number };
 }
 
-export interface RunEvent {
-  nodeId: string;
-  status: "queued" | "running" | "done" | "error";
-  outputs?: NodeOutput[];
-  error?: string;
-  ts: number;
+export type RunStatus = "idle" | "queued" | "running" | "done" | "error";
+
+/** React Flow node.data as seen by the canvas (adds runtime decoration). */
+export type FlowNodeData = NodeData & {
+  runStatus?: RunStatus;
+  runError?: string;
+  /** live token stream while an LLM node runs */
+  streamingText?: string;
+  /** last run usage for this node */
+  runUsage?: UsageInfo;
+};
+
+export interface UsageInfo {
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number; // dollars
+  model?: string;
 }
+
+export type RunEvent =
+  | { type: "run"; runId: string; status: "started"; ts: number }
+  | {
+      type: "node";
+      nodeId: string;
+      status: "queued" | "running" | "done" | "error";
+      outputs?: NodeOutput[];
+      error?: string;
+      usage?: UsageInfo;
+      ts: number;
+    }
+  | {
+      type: "delta"; // live token stream for a node
+      nodeId: string;
+      text: string;
+      ts: number;
+    }
+  | {
+      type: "run";
+      runId: string;
+      status: "done" | "error";
+      error?: string;
+      usage?: { totalCostUsd?: number; totalTokens?: number; durationMs?: number };
+      ts: number;
+    };

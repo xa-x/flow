@@ -1,22 +1,38 @@
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { generateText, generateImage } from "ai";
-import type { NodeData, NodeOutput } from "./types";
+import { generateImage, streamText, experimental_generateVideo } from "ai";
+import type { LanguageModel, ImageModel } from "ai";
+import type {
+  NodeData,
+  NodeOutput,
+  RunEvent,
+  RunSettings,
+  UsageInfo,
+} from "./types";
 import { nodeDef } from "./nodes";
 import { saveArtifact } from "./artifacts";
+import { resolveProvider, providerSpec } from "./providers";
 
-export const openrouter = createOpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY,
-  baseURL: "https://openrouter.ai/api/v1",
-});
+/**
+ * Node runners — every AI call goes through the provider registry
+ * (AI SDK model instances), with per-node usage/cost tracking.
+ */
 
-const DEFAULTS: Record<string, string> = {
-  llm: "deepseek/deepseek-v4-pro-0813",
-  "image.gen": "bytedance-seed/seedream-5-0-pro",
-  tts: "openai/gpt-audio-mini",
-  "video.gen": "bytedance/seedance-2.0",
+export const DEFAULT_PROVIDER = "openrouter";
+
+const DEFAULTS: Record<string, { provider: string; model: string }> = {
+  llm: { provider: "openrouter", model: "stealth/ox-alpha" },
+  "image.gen": {
+    provider: "openrouter",
+    model: "bytedance-seed/seedream-5-0-pro",
+  },
+  tts: { provider: "openrouter", model: "openai/gpt-audio-mini" },
+  "video.gen": { provider: "openrouter", model: "bytedance/seedance-2.0" },
 };
 
-export const modelFor = (d: NodeData) => d.model || DEFAULTS[d.kind] || "";
+export const modelFor = (d: NodeData) =>
+  d.model || DEFAULTS[d.kind]?.model || "";
+
+export const providerFor = (d: NodeData) =>
+  d.provider || DEFAULTS[d.kind]?.provider || DEFAULT_PROVIDER;
 
 /** Collect text-ish inputs (strings) into prompt parts. */
 function promptFrom(inputs: Record<string, NodeOutput[]>, data: NodeData) {
@@ -29,70 +45,100 @@ function promptFrom(inputs: Record<string, NodeOutput[]>, data: NodeData) {
   return parts.join("\n\n");
 }
 
+export interface RunCtx {
+  settings?: RunSettings;
+  emit: (e: RunEvent) => void;
+  nodeId: string;
+}
+
+export interface NodeResult {
+  outputs: NodeOutput[];
+  usage?: UsageInfo;
+}
+
 export async function runNode(
   nodeId: string,
   data: NodeData,
   inputs: Record<string, NodeOutput[]>,
-): Promise<NodeOutput[]> {
-  const model = modelFor(data);
+  ctx: RunCtx,
+): Promise<NodeResult> {
+  const settings = ctx.settings;
 
   switch (data.kind) {
     case "text":
     case "note":
-      return [{ type: "text", text: data.text ?? "" }];
+      return { outputs: [{ type: "text", text: data.text ?? "" }] };
 
     case "image.in":
-      if (data.artifactId)
-        return [{ type: "image", artifactId: data.artifactId, url: `/api/media/${data.artifactId}` }];
-      return [];
-
     case "audio.in":
-      if (data.artifactId)
-        return [{ type: "audio", artifactId: data.artifactId, url: `/api/media/${data.artifactId}` }];
-      return [];
-
-    case "video.in":
-      if (data.artifactId)
-        return [{ type: "video", artifactId: data.artifactId, url: `/api/media/${data.artifactId}` }];
-      return [];
+    case "video.in": {
+      if (!data.artifactId) return { outputs: [] };
+      const kind = data.kind.split(".")[0] as "image" | "audio" | "video";
+      return {
+        outputs: [
+          { type: kind, artifactId: data.artifactId, url: `/api/media/${data.artifactId}` },
+        ],
+      };
+    }
 
     case "llm": {
       const prompt = promptFrom(inputs, data);
-      if (!prompt.trim()) return [];
-      // Vision: attach the first upstream image if present.
+      if (!prompt.trim()) return { outputs: [] };
+      const provider = providerFor(data);
+      const model = modelFor(data);
+      const p = resolveProvider(provider, settings);
+      // vision: attach first upstream image
       const image = (inputs.image ?? []).find((o) => o.type === "image") as
-        | { type: "image"; url: string; artifactId?: string }
+        | { type: "image"; url?: string; artifactId?: string }
         | undefined;
 
-      const messages: Parameters<typeof generateText>[0]["messages"] = [
-        { role: "user", content: prompt },
-      ];
-      if (image?.url) {
-        messages[0] = {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            {
-              type: "file",
-              data: absoluteUrl(image.url),
-              mediaType: "image/png",
-            },
-          ],
-        };
+      const content: Array<
+        | { type: "text"; text: string }
+        | { type: "file"; data: string; mediaType: "image/png" }
+      > = [{ type: "text", text: prompt }];
+      if (image?.url || image?.artifactId) {
+        content.push({
+          type: "file",
+          data: absoluteUrl(image.url ?? `/api/media/${image.artifactId}`),
+          mediaType: "image/png",
+        });
       }
 
-      const { text } = await generateText({
-        model: openrouter.chat(model),
-        messages,
+      const result = streamText({
+        model: p.gw.chat(model) as LanguageModel,
+        messages: [{ role: "user", content }],
+        temperature: data.temperature,
       });
-      return [{ type: "text", text }];
+
+      // stream deltas to the canvas as they arrive
+      for await (const delta of result.textStream) {
+        ctx.emit({ type: "delta", nodeId, text: delta, ts: Date.now() });
+      }
+      const text = await result.text;
+      const u = await result.usage;
+      const meta = await result.providerMetadata;
+      // OpenRouter reports cost via provider metadata (openrouter.usage.cost)
+      const orUsage = (
+        meta?.openrouter as { usage?: { cost?: number } } | undefined
+      )?.usage;
+      return {
+        outputs: [{ type: "text", text }],
+        usage: {
+          tokensIn: u?.inputTokens,
+          tokensOut: u?.outputTokens,
+          costUsd: orUsage?.cost,
+          model,
+        },
+      };
     }
 
     case "image.gen": {
       const prompt = promptFrom(inputs, data);
-      if (!prompt.trim() && !(inputs.image ?? []).length) return [];
+      if (!prompt.trim() && !(inputs.image ?? []).length) return { outputs: [] };
+      const p = resolveProvider(providerFor(data), settings);
+      const model = modelFor(data);
       const { image } = await generateImage({
-        model: openrouter.imageModel(model),
+        model: p.gw.imageModel(model) as unknown as ImageModel,
         prompt: prompt || "abstract composition",
       });
       const art = await saveArtifact(
@@ -100,17 +146,25 @@ export async function runNode(
         image.mediaType || "image/png",
         "image",
       );
-      return [{ type: "image", artifactId: art.id, url: `/api/media/${art.id}` }];
+      return {
+        outputs: [
+          { type: "image", artifactId: art.id, url: `/api/media/${art.id}` },
+        ],
+        usage: { model },
+      };
     }
 
     case "tts": {
       const prompt = promptFrom(inputs, data);
-      if (!prompt.trim()) return [];
-      // OpenRouter audio generation endpoint (OpenAI-compatible shape).
-      const res = await fetch("https://openrouter.ai/api/v1/audio/speech", {
+      if (!prompt.trim()) return { outputs: [] };
+      // The provider instance has no speech model — call the provider's
+      // OpenAI-compatible speech endpoint directly.
+      const p = resolveProvider(providerFor(data), settings);
+      const model = modelFor(data);
+      const res = await fetch(`${p.baseUrl.replace(/\/$/, "")}/audio/speech`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          Authorization: `Bearer ${p.apiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -120,68 +174,76 @@ export async function runNode(
         }),
       });
       if (!res.ok) {
-        throw new Error(`TTS failed (${res.status}): ${await res.text()}`);
+        throw new Error(
+          `TTS failed (${res.status}): ${(await res.text()).slice(0, 300)}`,
+        );
       }
       const buf = new Uint8Array(await res.arrayBuffer());
       const mime = res.headers.get("content-type") || "audio/mpeg";
-      if (mime.includes("json")) throw new Error("TTS returned JSON, expected audio");
+      if (mime.includes("json"))
+        throw new Error("TTS returned JSON, expected audio");
       const art = await saveArtifact(buf, mime, "audio");
-      return [{ type: "audio", artifactId: art.id, url: `/api/media/${art.id}` }];
+      return {
+        outputs: [
+          { type: "audio", artifactId: art.id, url: `/api/media/${art.id}` },
+        ],
+        usage: { model },
+      };
     }
 
     case "video.gen": {
       const prompt = promptFrom(inputs, data);
       const firstFrame = (inputs.image ?? []).find(
         (o) => o.type === "image",
-      ) as { type: "image"; artifactId?: string } | undefined;
-      if (!prompt.trim() && !firstFrame) return [];
+      ) as { type: "image"; artifactId?: string; url?: string } | undefined;
+      if (!prompt.trim() && !firstFrame) return { outputs: [] };
 
-      const body: Record<string, unknown> = { model, prompt: prompt || "" };
-      if (firstFrame?.artifactId) {
-        body.frame_images = [
-          { image_url: { url: absoluteUrl(`/api/media/${firstFrame.artifactId}`) }, frame_type: "first_frame" },
-        ];
-      }
+      const provider = providerFor(data);
+      const spec = providerSpec(provider);
+      if (spec && !spec.caps.includes("video"))
+        throw new Error(
+          `Provider "${provider}" does not serve video models — use OpenRouter.`,
+        );
 
-      const sub = await fetch("https://openrouter.ai/api/v1/videos", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
+      const p = resolveProvider(provider, settings);
+      const model = modelFor(data);
+      const frameImages = firstFrame
+        ? [
+            {
+              image: absoluteUrl(
+                firstFrame.url ?? `/api/media/${firstFrame.artifactId}`,
+              ),
+              frameType: "first_frame" as const,
+            },
+          ]
+        : undefined;
+
+      const { videos } = await experimental_generateVideo({
+        model: p.gw.videoModel(model),
+        prompt: prompt || "",
+        frameImages,
+        download: async ({ url }) => {
+          const r = await fetch(url);
+          return {
+            data: new Uint8Array(await r.arrayBuffer()),
+            mediaType: "video/mp4",
+          };
         },
-        body: JSON.stringify(body),
-      }).then((r) => r.json());
-
-      if (sub.error) throw new Error(String(sub.error.message ?? sub.error));
-      const jobId = sub.id ?? sub.data?.id;
-      if (!jobId) throw new Error("No job id from video submit");
-
-      // Poll until terminal (video generation is async).
-      const deadline = Date.now() + 8 * 60_000;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 5000));
-        const job = await fetch(`https://openrouter.ai/api/v1/videos/${jobId}`, {
-          headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
-        }).then((r) => r.json());
-        const st = job.status ?? job.data?.status;
-        if (st === "completed" || st === "succeeded") break;
-        if (st === "failed" || st === "cancelled" || st === "expired")
-          throw new Error(`Video job ${st}: ${job.error ?? ""}`);
-      }
-
-      const vid = await fetch(
-        `https://openrouter.ai/api/v1/videos/${jobId}/content?index=0`,
-        { headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` } },
-      );
-      if (!vid.ok) throw new Error(`Video download failed (${vid.status})`);
-      const buf = new Uint8Array(await vid.arrayBuffer());
-      const art = await saveArtifact(buf, "video/mp4", "video");
-      return [{ type: "video", artifactId: art.id, url: `/api/media/${art.id}` }];
+      });
+      const v = videos[0];
+      if (!v) throw new Error("Video generation returned no videos");
+      const art = await saveArtifact(v.uint8Array, "video/mp4", "video");
+      return {
+        outputs: [
+          { type: "video", artifactId: art.id, url: `/api/media/${art.id}` },
+        ],
+        usage: { model },
+      };
     }
 
     case "out.text": {
       const t = (inputs.in ?? []).find((o) => o.type === "text");
-      return t ? [t] : [];
+      return { outputs: t ? [t] : [] };
     }
 
     case "out.media": {
@@ -192,17 +254,18 @@ export async function runNode(
       if (aud) outs.push(aud);
       const vid = (inputs.video ?? []).find((o) => o.type === "video");
       if (vid) outs.push(vid);
-      return outs;
+      return { outputs: outs };
     }
 
     default:
-      return [];
+      return { outputs: [] };
   }
 }
 
-function absoluteUrl(p: string) {
+function absoluteUrl(p?: string) {
+  const path = p ?? "";
   const base = process.env.FLOWBOOK_URL ?? "http://localhost:3000";
-  return p.startsWith("http") ? p : `${base}${p}`;
+  return path.startsWith("http") ? path : `${base}${path}`;
 }
 
 export { nodeDef };

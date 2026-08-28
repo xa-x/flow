@@ -1,14 +1,15 @@
 import { NextRequest } from "next/server";
 import { executeGraph } from "@/lib/engine";
-import type { GraphDoc, NodeOutput } from "@/lib/types";
+import type { GraphDoc, NodeOutput, ProviderConfig, RunSettings } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
  * POST /api/run
- * { graph: GraphDoc, only?: nodeId, cached?: Record<nodeId, NodeOutput[]> }
- * Streams NDJSON: one RunEvent per line.
+ * { graph: GraphDoc, graphId?, only?, cached?, settings? }
+ * Client-local provider credentials ride in settings.providers[id].
+ * Streams NDJSON: one RunEvent per line (run/node/delta events).
  */
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -21,7 +22,28 @@ export async function POST(req: NextRequest) {
   }
   const only: string | undefined =
     typeof body?.only === "string" ? body.only : undefined;
+  const graphId: string | undefined =
+    typeof body?.graphId === "string" ? body.graphId : undefined;
   const cached: Record<string, NodeOutput[]> | undefined = body?.cached;
+
+  // sanitize settings.providers: { id: { baseUrl?, apiKey? } }
+  const providers: Record<string, ProviderConfig> = {};
+  const raw = body?.settings?.providers;
+  if (raw && typeof raw === "object") {
+    for (const [id, cfg] of Object.entries(raw as Record<string, unknown>)) {
+      if (!cfg || typeof cfg !== "object") continue;
+      const c = cfg as Record<string, unknown>;
+      const entry: ProviderConfig = {};
+      if (typeof c.baseUrl === "string" && c.baseUrl.trim())
+        entry.baseUrl = c.baseUrl.trim();
+      if (typeof c.apiKey === "string" && c.apiKey.trim())
+        entry.apiKey = c.apiKey.trim();
+      providers[id] = entry;
+    }
+  }
+  const settings: RunSettings | undefined = Object.keys(providers).length
+    ? { providers }
+    : undefined;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -36,12 +58,12 @@ export async function POST(req: NextRequest) {
         }
       };
       try {
-        for await (const ev of executeGraph(graph, { only, cached })) {
+        for await (const ev of executeGraph(graph, { graphId, only, cached, settings })) {
           push(ev);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        push({ error: msg, ts: Date.now() });
+        push({ type: "run", status: "error", error: msg, ts: Date.now() });
       } finally {
         closed = true;
         try {

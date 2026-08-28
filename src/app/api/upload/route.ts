@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { artifacts } from "@/db/schema";
-import { saveArtifact, newId } from "@/lib/artifacts";
+import { saveArtifact } from "@/lib/artifacts";
 
 export const runtime = "nodejs";
 
