@@ -36,8 +36,8 @@ export function SettingsModal({
     "w-full rounded-md border border-line bg-sunken px-2.5 py-2 font-mono text-[11px] text-ink/90 outline-none transition-colors placeholder:text-faint focus:border-accent";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className="fb-pop w-full max-w-md overflow-hidden rounded-2xl border border-line bg-card shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/70 p-4 backdrop-blur-sm">
+      <div className="fb-pop w-full max-w-md overflow-hidden rounded-2xl border border-line bg-card shadow-2xl shadow-black/50">
         {/* header */}
         <div className="flex items-start justify-between px-5 pb-3 pt-4">
           <div>
@@ -151,7 +151,7 @@ export function SettingsModal({
               onSave(draft);
               onClose();
             }}
-            className="rounded-full bg-accent px-4 py-1.5 text-[12px] font-medium text-canvas transition-all hover:brightness-110 active:scale-[0.98]"
+            className="fb-btn-primary rounded-full px-4 py-1.5 text-[12px] font-medium transition-all hover:brightness-110 active:scale-[0.98]"
           >
             {onboarding ? "Save & start" : "Save"}
           </button>

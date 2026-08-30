@@ -24,7 +24,7 @@ OpenAI-compatible gateway can be added as a new spec entry:
 | id           | capabilities       | config                        |
 | ------------ | ------------------ | ----------------------------- |
 | `openrouter` | chat, image, video | `OPENROUTER_API_KEY`          |
-| `pyk`        | chat, image        | `PYK_BASE_URL` + `PYK_API_KEY`|
+| `pyok`       | chat, image        | `PYOK_BASE_URL` + `PYOK_API_KEY`|
 
 Credentials: the client's Settings (⚙︎, stored in localStorage) ride with
 each run; server `.env` values are the fallback. Adding a provider = one
@@ -67,10 +67,12 @@ cp .env.local.example .env.local   # add OPENROUTER_API_KEY
 npm run dev                        # http://localhost:3000
 ```
 
-Database schema lives in `src/db/schema.ts` (SQLite at `.data/flowbook.db`):
+Database schema lives in `src/db/schema.ts` (SQLite at `.data/flowbook.db`).
+Tables are created automatically on first request. To sync after a schema
+edit you can still run:
 
 ```bash
-npx drizzle-kit push   # apply schema changes
+npx drizzle-kit push
 ```
 
 ## API
@@ -79,7 +81,8 @@ npx drizzle-kit push   # apply schema changes
 | ---------------- | ------------------------------------------------ |
 | `POST /api/run`  | execute a graph; NDJSON event stream             |
 | `GET /api/runs`  | run history (`?graphId=` / `?runId=&nodes=1`)     |
-| `GET/POST/PATCH/DELETE /api/graphs` | workbook CRUD                 |
+| `GET/POST/PATCH/DELETE /api/graphs` | workbook list (metadata) + CRUD |
+| `GET /api/graphs/[id]` | one workbook document                    |
 | `POST /api/models` | per-provider model lists (OpenAI-compatible `/models`) |
 | `POST /api/upload` | media upload (multipart)                        |
 | `GET /api/media/[id]` | stream a stored artifact                    |

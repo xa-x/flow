@@ -1,15 +1,26 @@
 "use client";
 
-import { useState } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Handle,
+  Position,
+  useEdges,
+  useNodes,
+  type NodeProps,
+} from "@xyflow/react";
 import { nodeDef, type PortType } from "@/lib/nodes";
-import { CUSTOM_MODEL, groupModels } from "@/lib/models";
+import {
+  CUSTOM_MODEL,
+  filterModels,
+  groupModels,
+  kindForNode,
+  type ModelInfo,
+} from "@/lib/models";
 import { useCatalog } from "@/lib/model-catalog";
 import { PROVIDER_SPECS } from "@/lib/providers";
 
 /** Which gateway providers may serve this node kind, with UI labels. */
 function providerSpecFor(kind: string): { gateways: string[] } {
-  // every provider serves chat; image/video only where the spec says so
   const caps: Record<string, Array<"chat" | "image" | "video">> = {
     llm: ["chat"],
     "image.gen": ["image"],
@@ -26,15 +37,27 @@ function providerSpecFor(kind: string): { gateways: string[] } {
 const gatewayLabel = (pid: string) =>
   PROVIDER_SPECS.find((s) => s.id === pid)?.label ?? pid;
 import { describeOutputs } from "@/lib/render";
+import {
+  CUSTOM_PARAM,
+  IMAGE_ASPECTS,
+  IMAGE_SIZES,
+  VIDEO_ASPECTS,
+  VIDEO_DURATIONS,
+  VIDEO_RESOLUTIONS,
+  resolveVoice,
+  voiceChoices,
+} from "@/lib/media-params";
 import type { FlowNodeData } from "@/lib/types";
 import { OutputRenderer } from "./OutputRenderer";
+import { toast } from "./Toast";
+import { readJson } from "@/lib/http";
 
 const PORT_COLORS: Record<PortType, string> = {
-  text: "#d4b45c",
-  image: "#55b48d",
-  audio: "#dd8a60",
-  video: "#6f9fd9",
-  json: "#8b90a0",
+  text: "#3b82f6",
+  image: "#22c55e",
+  audio: "#ef4444",
+  video: "#60a5fa",
+  json: "#8a8a8a",
 };
 
 // Port rows stack from the top of the body on the left edge.
@@ -53,6 +76,16 @@ export function FlowNode({ id, data, selected }: NodeProps) {
   const [copied, setCopied] = useState(false);
   const [customModel, setCustomModel] = useState(false);
   const cat = useCatalog();
+  const incomingText = useIncomingText(id);
+
+  useEffect(() => {
+    if (d.kind !== "tts" || !d.voice) return;
+    const modelId = d.model ?? def?.models?.[0]?.id;
+    const listed = voicesForModel(cat.models, modelId);
+    if (!resolveVoice(modelId, d.voice, listed)) {
+      patch(id, { voice: undefined });
+    }
+  }, [cat.models, d.kind, d.model, d.voice, def, id]);
 
   if (!def) return null;
 
@@ -76,13 +109,25 @@ export function FlowNode({ id, data, selected }: NodeProps) {
       const fd = new FormData();
       fd.append("file", file);
       const res = await fetch("/api/upload", { method: "POST", body: fd });
-      const j = await res.json();
-      if (j.id)
-        window.dispatchEvent(
-          new CustomEvent("flowbook:set-artifact", {
-            detail: { nodeId: id, artifactId: j.id },
-          }),
-        );
+      const j = await readJson<{ id?: string; error?: string }>(res).catch(
+        () => ({} as { id?: string; error?: string }),
+      );
+      if (!res.ok || !j.id) {
+        const msg =
+          typeof j.error === "string" ? j.error : "Upload failed";
+        toast(msg, "error");
+        patch(id, { runStatus: "error", runError: msg });
+        return;
+      }
+      window.dispatchEvent(
+        new CustomEvent("flowbook:set-artifact", {
+          detail: { nodeId: id, artifactId: j.id },
+        }),
+      );
+      patch(id, { runStatus: undefined, runError: undefined });
+    } catch {
+      toast("Upload failed", "error");
+      patch(id, { runStatus: "error", runError: "Upload failed" });
     } finally {
       setUpl(false);
     }
@@ -144,12 +189,55 @@ export function FlowNode({ id, data, selected }: NodeProps) {
               );
             }}
             title="Run this node"
-            className="nodrag -mr-0.5 flex h-5 w-5 items-center justify-center rounded text-faint opacity-0 transition-all hover:bg-white/5 hover:text-accent focus-visible:opacity-100 group-hover:opacity-100"
+            className="nodrag -mr-0.5 flex h-5 w-5 items-center justify-center rounded text-faint opacity-0 transition-all hover:bg-white/5 hover:text-live focus-visible:opacity-100 group-hover:opacity-100"
           >
             <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden>
               <path d="M1.5 0.8 8.5 5 1.5 9.2Z" fill="currentColor" />
             </svg>
           </button>
+        )}
+
+        {status !== "running" && (
+          <>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                window.dispatchEvent(
+                  new CustomEvent("flowbook:duplicate-node", {
+                    detail: { nodeId: id },
+                  }),
+                );
+              }}
+              title="Duplicate node"
+              className="nodrag flex h-5 w-5 items-center justify-center rounded text-faint opacity-0 transition-all hover:bg-white/5 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden>
+                <rect x="0.8" y="2.4" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" fill="none" />
+                <path d="M3.2 2.4V1.6A.8.8 0 0 1 4 .8h4.4A.8.8 0 0 1 9.2 1.6V6a.8.8 0 0 1-.8.8H7.6" stroke="currentColor" strokeWidth="1.2" fill="none" />
+              </svg>
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                window.dispatchEvent(
+                  new CustomEvent("flowbook:remove-node", {
+                    detail: { nodeId: id },
+                  }),
+                );
+              }}
+              title="Delete node"
+              className="nodrag flex h-5 w-5 items-center justify-center rounded text-faint opacity-0 transition-all hover:bg-white/5 hover:text-err focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
+                <path
+                  d="M1.5 1.5 6.5 6.5M6.5 1.5 1.5 6.5"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          </>
         )}
 
         <StatusMark status={status} />
@@ -229,14 +317,27 @@ export function FlowNode({ id, data, selected }: NodeProps) {
           />
         )}
 
-        {(d.kind === "llm" || d.kind === "image.gen" || d.kind === "video.gen") && (
+        {(d.kind === "llm" ||
+          d.kind === "image.gen" ||
+          d.kind === "video.gen" ||
+          d.kind === "tts") && (
           <textarea
-            value={d.prompt ?? ""}
+            value={
+              d.kind === "tts" && !d.prompt?.trim()
+                ? incomingText
+                : (d.prompt ?? "")
+            }
             onChange={(e) => patch(id, { prompt: e.target.value })}
             placeholder={
               d.kind === "llm"
                 ? "What should the model do with the input?"
-                : "Describe what to generate…"
+                : d.kind === "image.gen"
+                  ? "Describe the image — or how to edit the reference…"
+                  : d.kind === "tts"
+                    ? incomingText
+                      ? "Connected text will be spoken…"
+                      : "Text to speak…"
+                    : "Describe what to generate…"
             }
             rows={3}
             className="nodrag nowheel mb-2 w-full resize-y rounded-md border border-line bg-sunken px-2 py-1.5 text-[12px] leading-relaxed text-ink/85 outline-none transition-colors placeholder:text-faint focus:border-line2"
@@ -244,24 +345,46 @@ export function FlowNode({ id, data, selected }: NodeProps) {
         )}
 
         {def.models && def.models.length > 0 && (() => {
-          // live catalogs per provider (except OpenRouter presets below)
+          const need = kindForNode(d.kind) ?? "chat";
           const spec = providerSpecFor(d.kind);
-          const groups: { provider: string; label: string; items: { id: string; label: string }[] }[] =
-            [...groupModels(def.models)];
+          const seen = new Set<string>();
+          const groups: { provider: string; label: string; items: ModelInfo[] }[] =
+            [];
+
+          const addGroup = (
+            provider: string,
+            label: string,
+            items: ModelInfo[],
+          ) => {
+            const unique = items.filter((m) => {
+              if (seen.has(m.id)) return false;
+              seen.add(m.id);
+              return true;
+            });
+            if (unique.length) groups.push({ provider, label, items: unique });
+          };
+
+          addGroup("suggested", "Suggested", def.models);
+
+          for (const g of groupModels(
+            filterModels(cat.models.openrouter ?? [], need),
+          )) {
+            addGroup(g.provider, g.label, g.items);
+          }
+
           const gatewayProviders = spec.gateways
             .map((pid) => ({
               pid,
-              items: (cat.models[pid] ?? []) as { id: string; label: string }[],
+              items: filterModels(cat.models[pid] ?? [], need),
             }))
             .filter((g) => g.items.length > 0);
           for (const g of gatewayProviders)
-            groups.push({ provider: g.pid, label: gatewayLabel(g.pid), items: g.items });
+            addGroup(g.pid, gatewayLabel(g.pid), g.items);
 
-          const knownIds = def.models.map((m) => m.id);
+          const knownIds = [...seen];
           const inGateway = gatewayProviders.some((g) =>
             g.items.some((m) => m.id === d.model),
           );
-          // saved gateway model that isn't currently listed (offline?) → editable fallback
           const orphanGateway =
             !!d.provider && d.provider !== "openrouter" && !!d.model && !inGateway;
           const showCustom =
@@ -278,9 +401,12 @@ export function FlowNode({ id, data, selected }: NodeProps) {
             const fromGateway = gatewayProviders.find((g) =>
               g.items.some((m) => m.id === value),
             );
+            const listed = voicesForModel(cat.models, value);
+            const voice = resolveVoice(value, d.voice, listed);
             patch(id, {
               model: value,
               provider: fromGateway ? fromGateway.pid : "openrouter",
+              ...(d.kind === "tts" ? { voice } : {}),
             });
           };
 
@@ -341,12 +467,87 @@ export function FlowNode({ id, data, selected }: NodeProps) {
           );
         })()}
 
+        {d.kind === "image.gen" && (
+          <div className="mb-2 grid grid-cols-2 gap-1.5">
+            <OptionalParam
+              value={d.aspectRatio}
+              onChange={(aspectRatio) =>
+                patch(id, {
+                  aspectRatio,
+                  size: aspectRatio ? undefined : d.size,
+                })
+              }
+              options={IMAGE_ASPECTS}
+              autoLabel="Aspect · Auto"
+              customPlaceholder="W:H — 16:9"
+            />
+            <OptionalParam
+              value={d.size}
+              onChange={(size) =>
+                patch(id, {
+                  size,
+                  aspectRatio: size ? undefined : d.aspectRatio,
+                })
+              }
+              options={IMAGE_SIZES}
+              autoLabel="Size · Auto"
+              customPlaceholder="1024x1024"
+            />
+          </div>
+        )}
+
+        {d.kind === "video.gen" && (
+          <div className="mb-2 space-y-1.5">
+            <div className="grid grid-cols-2 gap-1.5">
+              <OptionalParam
+                value={d.duration != null ? String(d.duration) : undefined}
+                onChange={(raw) =>
+                  patch(id, {
+                    duration: raw ? Number(raw) || undefined : undefined,
+                  })
+                }
+                options={VIDEO_DURATIONS}
+                autoLabel="Length · Auto"
+                customPlaceholder="Seconds"
+              />
+              <OptionalParam
+                value={d.aspectRatio}
+                onChange={(aspectRatio) => patch(id, { aspectRatio })}
+                options={VIDEO_ASPECTS}
+                autoLabel="Aspect · Auto"
+                customPlaceholder="W:H — 16:9"
+              />
+            </div>
+            <OptionalParam
+              value={d.resolution}
+              onChange={(resolution) => patch(id, { resolution })}
+              options={VIDEO_RESOLUTIONS}
+              autoLabel="Resolution · Auto"
+              customPlaceholder="1920x1080"
+            />
+          </div>
+        )}
+
+        {d.kind === "tts" && (
+          <OptionalParam
+            value={d.voice}
+            onChange={(voice) => patch(id, { voice })}
+            options={voiceChoices(
+              d.model ?? def.models?.[0]?.id,
+              voicesForModel(cat.models, d.model ?? def.models?.[0]?.id),
+            )}
+            autoLabel="Voice · Auto"
+            customPlaceholder="this model's voice id"
+            className="mb-2"
+          />
+        )}
+
         {/* media input */}
         {isMediaIn && (
           <label
             className={`nodrag flex cursor-pointer items-center justify-center rounded-md border border-dashed bg-sunken px-2 py-2.5 font-mono text-[10px] uppercase tracking-[0.14em] transition-colors ${
               upl
-                ? "border-accent/50 text-accent"
+                ? "border-live/50 text-live"
                 : "border-line2 text-muted hover:border-accent/60 hover:text-ink"
             }`}
           >
@@ -391,7 +592,7 @@ export function FlowNode({ id, data, selected }: NodeProps) {
                 <button
                   onClick={() => copy(outputs.map((o) => (o.type === "text" ? o.text : o.url ?? "")).join("\n\n"))}
                   title="Copy raw output"
-                  className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted transition-colors hover:text-accent"
+                  className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted transition-colors hover:text-live"
                 >
                   {copied ? "Copied ✓" : "Copy"}
                 </button>
@@ -412,7 +613,7 @@ export function FlowNode({ id, data, selected }: NodeProps) {
             </div>
           ) : status === "running" || status === "queued" ? (
             <div className="flex items-center gap-2 py-3 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-              <Spinner className="text-accent" />
+              <Spinner className="text-live" />
               Awaiting results…
             </div>
           ) : (
@@ -425,7 +626,7 @@ export function FlowNode({ id, data, selected }: NodeProps) {
           ))}
 
         {status === "error" && (
-          <div className="mt-2 rounded-md border border-err/40 bg-err/10 px-2.5 py-2 text-[11px] leading-snug text-[#eb9082]">
+          <div className="mt-2 rounded-md border border-err/40 bg-err/10 px-2.5 py-2 text-[11px] leading-snug text-err">
             {d.runError}
           </div>
         )}
@@ -434,16 +635,116 @@ export function FlowNode({ id, data, selected }: NodeProps) {
   );
 }
 
+function useIncomingText(nodeId: string) {
+  const nodes = useNodes();
+  const edges = useEdges();
+  return useMemo(() => {
+    const parts: string[] = [];
+    for (const e of edges) {
+      if (e.target !== nodeId) continue;
+      const src = nodes.find((n) => n.id === e.source);
+      if (!src) continue;
+      const data = src.data as FlowNodeData;
+      const fromOut = (data.outputs ?? [])
+        .filter(
+          (o): o is { type: "text"; text: string } =>
+            o.type === "text" && !!o.text?.trim(),
+        )
+        .map((o) => o.text);
+      if (fromOut.length) {
+        parts.push(...fromOut);
+        continue;
+      }
+      if (data.streamingText?.trim()) {
+        parts.push(data.streamingText);
+        continue;
+      }
+      if ((data.kind === "text" || data.kind === "note") && data.text?.trim()) {
+        parts.push(data.text);
+      }
+    }
+    return parts.join("\n\n");
+  }, [edges, nodeId, nodes]);
+}
+
+function voicesForModel(
+  catalogs: Record<string, ModelInfo[]>,
+  modelId?: string,
+): string[] | undefined {
+  if (!modelId) return;
+  for (const list of Object.values(catalogs)) {
+    const hit = list?.find((m) => m.id === modelId);
+    if (hit?.voices?.length) return hit.voices;
+  }
+}
+
+function OptionalParam({
+  value,
+  onChange,
+  options,
+  autoLabel,
+  customPlaceholder,
+  className = "",
+}: {
+  value?: string;
+  onChange: (next?: string) => void;
+  options: readonly { value: string; label: string }[];
+  autoLabel: string;
+  customPlaceholder?: string;
+  className?: string;
+}) {
+  const [forceCustom, setForceCustom] = useState(false);
+  const known = options.some((o) => o.value === value);
+  const custom = forceCustom || (!!value && !known);
+  const selectValue = custom ? CUSTOM_PARAM : (value ?? "");
+
+  return (
+    <div className={`min-w-0 ${className}`}>
+      <select
+        value={selectValue}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (next === CUSTOM_PARAM) {
+            setForceCustom(true);
+            if (known) onChange(undefined);
+            return;
+          }
+          setForceCustom(false);
+          onChange(next || undefined);
+        }}
+        className="nodrag w-full rounded-md border border-line bg-sunken px-2 py-1.5 font-mono text-[10.5px] text-muted outline-none transition-colors focus:border-line2"
+      >
+        <option value="">{autoLabel}</option>
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+        <option value={CUSTOM_PARAM}>Custom…</option>
+      </select>
+      {custom && (
+        <input
+          value={value ?? ""}
+          onChange={(e) => onChange(e.target.value.trim() || undefined)}
+          spellCheck={false}
+          placeholder={customPlaceholder}
+          className="nodrag mt-1 w-full rounded-md border border-accent/40 bg-sunken px-2 py-1.5 font-mono text-[10.5px] text-ink/85 outline-none transition-colors placeholder:text-faint focus:border-accent"
+        />
+      )}
+    </div>
+  );
+}
+
 function StatusMark({ status }: { status: string }) {
   if (status === "running")
-    return <Spinner className="shrink-0 text-accent" />;
+    return <Spinner className="shrink-0 text-live" />;
   const color =
     status === "done"
       ? "var(--color-ok)"
       : status === "error"
         ? "var(--color-err)"
         : status === "queued"
-          ? "var(--color-accent)"
+          ? "var(--color-live)"
           : "var(--color-line2)";
   return (
     <span
@@ -482,7 +783,14 @@ function MediaPreview({ url, kind }: { url: string; kind: string }) {
       />
     );
   if (kind === "audio")
-    return <audio controls src={url} className="nodrag mt-2 w-full" />;
+    return (
+      <audio
+        controls
+        preload="metadata"
+        src={url.includes("?") ? `${url}&play=1` : `${url}?play=1`}
+        className="nodrag mt-2 w-full"
+      />
+    );
   if (kind === "video")
     return (
       <video

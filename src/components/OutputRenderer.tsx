@@ -9,6 +9,11 @@ import type { NodeOutput } from "@/lib/types";
  * Full HTML pages/apps preview in a sandboxed iframe; markdown becomes
  * prose; JSON gets a viewer; bare media URLs become elements.
  */
+function playableSrc(src: string) {
+  if (!src || src.startsWith("data:") || src.startsWith("blob:")) return src;
+  return src.includes("?") ? `${src}&play=1` : `${src}?play=1`;
+}
+
 export function OutputRenderer({ output }: { output: NodeOutput }) {
   if (output.type === "text") {
     const blocks = parseTextOutput(output.text ?? "");
@@ -82,11 +87,11 @@ function HtmlPreview({ code }: { code: string }) {
             target="_blank"
             rel="noopener noreferrer"
             title="Open in new tab"
-            className="text-faint transition-colors hover:text-accent"
+            className="text-faint transition-colors hover:text-live"
           >
             Open ↗
           </a>
-          <button onClick={copy} className="text-faint transition-colors hover:text-accent">
+          <button onClick={copy} className="text-faint transition-colors hover:text-live">
             {copied ? "Copied ✓" : "Copy"}
           </button>
         </div>
@@ -123,7 +128,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
         <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-faint">
           {lang || "code"}
         </span>
-        <button onClick={copy} className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted transition-colors hover:text-accent">
+        <button onClick={copy} className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted transition-colors hover:text-live">
           {copied ? "Copied ✓" : "Copy"}
         </button>
       </div>
@@ -159,7 +164,14 @@ function MediaEmbed({ kind, src }: { kind: string; src: string }) {
     // eslint-disable-next-line @next/next/no-img-element
     return <img src={src} alt="" className="fb-media nowheel max-h-56 w-full object-cover" />;
   if (kind === "audio")
-    return <audio controls src={src} className="nodrag mt-1 w-full" />;
+    return (
+      <audio
+        controls
+        preload="metadata"
+        src={playableSrc(src)}
+        className="nodrag mt-1 w-full"
+      />
+    );
   if (kind === "video")
     return <video controls src={src} className="fb-media nowheel max-h-56 w-full" />;
   return null;

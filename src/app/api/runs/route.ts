@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { runs, runNodes } from "@/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { graphs, runs, runNodes } from "@/db/schema";
+import { desc, eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
 /**
- * GET /api/runs?graphId=…&limit=20        — recent runs (with totals)
- * GET /api/runs?graphId=…&runId=…&nodes=1 — one run + its node rows
+ * GET /api/runs?limit=20                  — recent runs across workbooks
+ * GET /api/runs?graphId=…&limit=20        — recent runs for one workbook
+ * GET /api/runs?runId=…&nodes=1           — one run + its node rows
  */
 export async function GET(req: NextRequest) {
   const graphId = req.nextUrl.searchParams.get("graphId");
@@ -27,13 +28,24 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ run, nodes });
   }
 
-  if (!graphId)
-    return NextResponse.json({ error: "graphId required" }, { status: 400 });
-
-  const rows = await db
-    .select()
-    .from(runs)
-    .where(graphId ? and(eq(runs.graphId, graphId)) : undefined)
+  const cols = {
+    id: runs.id,
+    graphId: runs.graphId,
+    graphTitle: graphs.title,
+    status: runs.status,
+    trigger: runs.trigger,
+    totalCostUsd: runs.totalCostUsd,
+    totalTokens: runs.totalTokens,
+    durationMs: runs.durationMs,
+    error: runs.error,
+    startedAt: runs.startedAt,
+    finishedAt: runs.finishedAt,
+  };
+  const base = db.select(cols).from(runs).leftJoin(graphs, eq(runs.graphId, graphs.id));
+  const rows = await (graphId
+    ? base.where(eq(runs.graphId, graphId))
+    : base
+  )
     .orderBy(desc(runs.startedAt))
     .limit(limit);
 

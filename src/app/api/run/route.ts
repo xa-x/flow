@@ -7,7 +7,7 @@ export const maxDuration = 300;
 
 /**
  * POST /api/run
- * { graph: GraphDoc, graphId?, only?, cached?, settings? }
+ * { graph: GraphDoc, graphId?, only?, from?, cached?, settings? }
  * Client-local provider credentials ride in settings.providers[id].
  * Streams NDJSON: one RunEvent per line (run/node/delta events).
  */
@@ -22,6 +22,8 @@ export async function POST(req: NextRequest) {
   }
   const only: string | undefined =
     typeof body?.only === "string" ? body.only : undefined;
+  const from: string | undefined =
+    typeof body?.from === "string" ? body.from : undefined;
   const graphId: string | undefined =
     typeof body?.graphId === "string" ? body.graphId : undefined;
   const cached: Record<string, NodeOutput[]> | undefined = body?.cached;
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest) {
         }
       };
       try {
-        for await (const ev of executeGraph(graph, { graphId, only, cached, settings })) {
+        for await (const ev of executeGraph(graph, { graphId, only, from, cached, settings })) {
           push(ev);
         }
       } catch (err) {

@@ -9,6 +9,8 @@ import {
   type DragEvent,
   type MouseEvent,
 } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ReactFlow,
   Background,
@@ -29,119 +31,118 @@ import "@xyflow/react/dist/style.css";
 import { NODE_TYPES, nodeDef, portAccepts } from "@/lib/nodes";
 import type {
   FlowNodeData,
+  GraphDoc,
   NodeData,
   NodeOutput,
   RunEvent,
-  RunSettings,
 } from "@/lib/types";
-import { hasUsableProvider, loadSettings, saveSettings } from "@/lib/settings";
 import { ModelCatalogProvider, useModelCatalog } from "@/lib/model-catalog";
+import { starterGraph } from "@/lib/starter";
+import { downstreamIds } from "@/lib/graph";
+import { useSettings } from "@/lib/use-settings";
+import { AssistantPanel } from "./AssistantPanel";
 import { FlowNode } from "./FlowNode";
 import { DND_MIME, Palette } from "./Palette";
 import { PlayBar } from "./PlayBar";
 import { RunsPanel } from "./RunsPanel";
 import { SettingsModal } from "./SettingsModal";
+import { StatusScreen } from "./StatusScreen";
+import { toast } from "./Toast";
+import { readJson } from "@/lib/http";
 
 type FN = Node<FlowNodeData, "flow">;
 
 const nodeTypes = { flow: FlowNode };
 
-export function Canvas() {
+export function Canvas({
+  graphId,
+  startAssistant = false,
+}: {
+  graphId: string;
+  startAssistant?: boolean;
+}) {
+  const router = useRouter();
   const [nodes, setNodes, onNodesChange] = useNodesState<FN>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [graphId, setGraphId] = useState<string | null>(null);
   const [title, setTitle] = useState("Untitled");
   const [running, setRunning] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
   const [showMini, setShowMini] = useState(false);
   const [showRuns, setShowRuns] = useState(false);
+  const [showAssistant, setShowAssistant] = useState(startAssistant);
   const [books, setBooks] = useState<
     { id: string; title: string; updatedAt?: string | number }[]
   >([]);
-  // provider credentials (local) + what the server already has (.env)
-  const [settings, setSettings] = useState<RunSettings>(() => ({
-    providers: {},
-  }));
-  const [env, setEnv] = useState<Record<string, boolean>>({});
-  const [showSettings, setShowSettings] = useState(false);
-  const [onboardDismissed, setOnboardDismissed] = useState(false);
-  const [booted, setBooted] = useState(false);
-  // live model catalogs from each configured provider
-  const { catalog, reload: reloadCatalog } = useModelCatalog(settings, env);
+  const [missing, setMissing] = useState(false);
+  const [ready, setReady] = useState(false);
+  const settingsApi = useSettings();
+  const { catalog, reload: reloadCatalog } = useModelCatalog(
+    settingsApi.settings,
+    settingsApi.env,
+  );
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // last known outputs per node — feeds single-node runs and survives re-renders
   const outputsRef = useRef<Record<string, NodeOutput[]>>({});
+  const inflightRef = useRef(new Set<AbortController>());
+  const fullRunRef = useRef<AbortController | null>(null);
+  const stoppingRef = useRef(false);
   const rf = useReactFlow();
 
-  // ------- load local settings + server env flags on mount -------
   useEffect(() => {
     let alive = true;
     (async () => {
-      const local = loadSettings();
-      let cfg: { envProviders?: Record<string, boolean> } = {};
       try {
-        cfg = await fetch("/api/config").then((r) => r.json());
+        const res = await fetch(`/api/graphs/${graphId}`);
+        if (res.status === 404) {
+          if (alive) setMissing(true);
+          return;
+        }
+        const { graph: g } = await readJson<{ graph?: { id: string; title: string; graph?: { nodes?: FN[]; edges?: Edge[]; viewport?: { x: number; y: number; zoom: number } } } }>(res);
+        if (!alive || !g) return;
+        setTitle(g.title);
+        const loaded = (g.graph?.nodes ?? []).map(
+          (n: {
+            id: string;
+            position: { x: number; y: number };
+            data: FlowNodeData;
+          }) =>
+            ({
+              id: n.id,
+              type: "flow",
+              position: n.position,
+              data: n.data,
+            }) as FN,
+        );
+        setNodes(loaded);
+        setEdges(
+          (g.graph?.edges ?? []).map((e: Edge) => ({
+            ...e,
+            type: e.type ?? "smoothstep",
+          })),
+        );
+        outputsRef.current = Object.fromEntries(
+          loaded
+            .filter((n) => n.data.outputs?.length)
+            .map((n) => [n.id, n.data.outputs as NodeOutput[]]),
+        );
+        setDirty(false);
+        setReady(true);
+        const viewport = g.graph?.viewport;
+        if (viewport)
+          setTimeout(() => rf.setViewport(viewport, { duration: 0 }), 80);
       } catch {
-        /* server unreachable — treat as env-less */
+        if (alive) {
+          toast("Couldn’t load this workbook.", "error");
+          setMissing(true);
+        }
       }
-      if (!alive) return;
-      setSettings(local);
-      setEnv(cfg.envProviders ?? {});
-      setOnboardDismissed(
-        window.localStorage.getItem("flowbook.onboarded") === "1",
-      );
-      setBooted(true);
     })();
     return () => {
       alive = false;
     };
-  }, []);
-
-  // ------- load latest graph + workbook list on mount -------
-  useEffect(() => {
-    (async () => {
-      const res = await fetch("/api/graphs");
-      const { graphs } = await res.json();
-      setBooks(
-        (graphs ?? []).map((g: { id: string; title: string; updatedAt?: string }) => ({
-          id: g.id,
-          title: g.title,
-          updatedAt: g.updatedAt,
-        })),
-      );
-      if (graphs?.length) {
-        const g = graphs[0];
-        setGraphId(g.id);
-        setTitle(g.title);
-        setNodes(
-          (g.graph?.nodes ?? []).map(
-            (n: { id: string; position: { x: number; y: number }; data: FlowNodeData }) =>
-              ({
-                id: n.id,
-                type: "flow",
-                position: n.position,
-                data: n.data,
-              }) as FN,
-          ),
-        );
-        setEdges(g.graph?.edges ?? []);
-        if (g.graph?.viewport)
-          setTimeout(
-            () => rf.setViewport(g.graph.viewport, { duration: 0 }),
-            80,
-          );
-      } else {
-        const seed = starterGraph();
-        setNodes(seed.nodes);
-        setEdges(seed.edges);
-        setDirty(true);
-      }
-    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [graphId]);
 
-  // ------- autosave (debounced) -------
   const doc = useMemo(
     () => ({
       nodes: nodes.map((n) => ({
@@ -155,7 +156,12 @@ export function Canvas() {
           model: n.data.model,
           provider: n.data.provider,
           voice: n.data.voice,
+          size: n.data.size,
+          aspectRatio: n.data.aspectRatio,
+          duration: n.data.duration,
+          resolution: n.data.resolution,
           artifactId: n.data.artifactId,
+          outputs: n.data.outputs,
         } as FlowNodeData,
       })),
       edges,
@@ -166,55 +172,71 @@ export function Canvas() {
   );
 
   const refreshBooks = useCallback(async () => {
-    const res = await fetch("/api/graphs");
-    const { graphs } = await res.json();
-    setBooks(
-      (graphs ?? []).map((g: { id: string; title: string; updatedAt?: string }) => ({
-        id: g.id,
-        title: g.title,
-        updatedAt: g.updatedAt,
-      })),
-    );
+    try {
+      const res = await fetch("/api/graphs");
+      const { graphs } = await readJson<{
+        graphs?: { id: string; title: string; updatedAt?: string }[];
+      }>(res);
+      setBooks(
+        (graphs ?? []).map(
+          (g: { id: string; title: string; updatedAt?: string }) => ({
+            id: g.id,
+            title: g.title,
+            updatedAt: g.updatedAt,
+          }),
+        ),
+      );
+    } catch {
+      /* list is non-critical */
+    }
   }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => refreshBooks(), 0);
+    return () => clearTimeout(t);
+  }, [refreshBooks]);
 
   const save = useCallback(
     async (manual = false) => {
-      const body = { id: graphId, title, graph: doc };
-      if (graphId) {
-        await fetch("/api/graphs", {
+      try {
+        const res = await fetch("/api/graphs", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ id: graphId, title, graph: doc }),
         });
-      } else {
-        const res = await fetch("/api/graphs", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const j = await res.json();
-        if (j.graph?.id) setGraphId(j.graph.id);
+        if (!res.ok) throw new Error("Save failed");
+        setDirty(false);
+        setSaved(new Date().toLocaleTimeString());
+        refreshBooks();
+        if (manual) setTimeout(() => setSaved(null), 2000);
+      } catch (e) {
+        toast(e instanceof Error ? e.message : "Save failed", "error");
       }
-      setDirty(false);
-      setSaved(new Date().toLocaleTimeString());
-      refreshBooks();
-      if (manual) setTimeout(() => setSaved(null), 2000);
     },
     [graphId, title, doc, refreshBooks],
   );
 
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty || !ready) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => save(), 1200);
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
-  }, [dirty, doc, save]);
+  }, [dirty, doc, save, ready]);
+
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    return () => {
+      if (dirtyRef.current) void saveRef.current();
+    };
+  }, [graphId]);
 
   const touch = useCallback(() => setDirty(true), []);
 
-  // ------- node updates from FlowNode (custom events) -------
   useEffect(() => {
     const onUpdate = (e: Event) => {
       const { nodeId, patch } = (e as CustomEvent).detail;
@@ -231,22 +253,58 @@ export function Canvas() {
       const { nodeId, artifactId } = (e as CustomEvent).detail;
       setNodes((ns) =>
         ns.map((n) =>
-          n.id === nodeId
-            ? { ...n, data: { ...n.data, artifactId } }
-            : n,
+          n.id === nodeId ? { ...n, data: { ...n.data, artifactId } } : n,
         ),
       );
       touch();
     };
+    const onRemove = (e: Event) => {
+      const { nodeId } = (e as CustomEvent).detail as { nodeId: string };
+      setNodes((ns) => ns.filter((n) => n.id !== nodeId));
+      setEdges((es) =>
+        es.filter((ed) => ed.source !== nodeId && ed.target !== nodeId),
+      );
+      touch();
+    };
+    const onDuplicate = (e: Event) => {
+      const { nodeId } = (e as CustomEvent).detail as { nodeId: string };
+      setNodes((ns) => {
+        const src = ns.find((n) => n.id === nodeId);
+        if (!src) return ns;
+        const id = `n${Date.now().toString(36)}${Math.random()
+          .toString(36)
+          .slice(2, 5)}`;
+        return [
+          ...ns,
+          {
+            ...src,
+            id,
+            selected: false,
+            position: { x: src.position.x + 40, y: src.position.y + 40 },
+            data: {
+              ...src.data,
+              runStatus: undefined,
+              runError: undefined,
+              outputs: undefined,
+              streamingText: undefined,
+            },
+          },
+        ];
+      });
+      touch();
+    };
     window.addEventListener("flowbook:update", onUpdate);
     window.addEventListener("flowbook:set-artifact", onArtifact);
+    window.addEventListener("flowbook:remove-node", onRemove);
+    window.addEventListener("flowbook:duplicate-node", onDuplicate);
     return () => {
       window.removeEventListener("flowbook:update", onUpdate);
       window.removeEventListener("flowbook:set-artifact", onArtifact);
+      window.removeEventListener("flowbook:remove-node", onRemove);
+      window.removeEventListener("flowbook:duplicate-node", onDuplicate);
     };
-  }, [setNodes, touch]);
+  }, [setNodes, setEdges, touch]);
 
-  // ------- connections -------
   const isValidConnection = useCallback<IsValidConnection>(
     (conn) => {
       const src = nodes.find((n) => n.id === conn.source);
@@ -283,7 +341,6 @@ export function Canvas() {
     [setEdges, touch],
   );
 
-  // ------- add node (click palette or drag onto canvas) -------
   const addAt = useCallback(
     (type: string, x: number, y: number) => {
       const def = nodeDef(type);
@@ -315,7 +372,11 @@ export function Canvas() {
         x: window.innerWidth / 2,
         y: window.innerHeight / 2,
       });
-      addAt(type, c.x - 130 + (Math.random() - 0.5) * 90, c.y - 40 + (Math.random() - 0.5) * 70);
+      addAt(
+        type,
+        c.x - 130 + (Math.random() - 0.5) * 90,
+        c.y - 40 + (Math.random() - 0.5) * 70,
+      );
     },
     [addAt, rf],
   );
@@ -338,15 +399,43 @@ export function Canvas() {
     }
   }, []);
 
-  // ------- run -------
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
   const edgesRef = useRef(edges);
   edgesRef.current = edges;
   const [runsTick, setRunsTick] = useState(0);
 
+  const resetInFlight = useCallback(
+    (status: "idle" | "error", error?: string, ids?: string[]) => {
+      const mine = ids ? new Set(ids) : null;
+      setNodes((ns) =>
+        ns.map((n) =>
+          (n.data.runStatus === "queued" || n.data.runStatus === "running") &&
+          (!mine || mine.has(n.id))
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  runStatus: status,
+                  runError: error,
+                  streamingText: undefined,
+                },
+              }
+            : n,
+        ),
+      );
+    },
+    [setNodes],
+  );
+
   const run = useCallback(
-    async (only?: string) => {
+    async (from?: string) => {
+      const ac = new AbortController();
+      if (!from) {
+        fullRunRef.current?.abort();
+        fullRunRef.current = ac;
+      }
+      inflightRef.current.add(ac);
       setRunning(true);
       const payload = {
         graph: {
@@ -357,13 +446,14 @@ export function Canvas() {
           })),
           edges: edgesRef.current,
         },
-        graphId: graphId ?? undefined,
-        only,
+        graphId,
+        from,
         cached: outputsRef.current,
-        // local credentials ride along; server .env stays the fallback
-        settings,
+        settings: settingsApi.settings,
       };
-      const targets = only ? [only] : nodesRef.current.map((n) => n.id);
+      const targets = from
+        ? downstreamIds(from, edgesRef.current)
+        : nodesRef.current.map((n) => n.id);
       setNodes((ns) =>
         ns.map((n) =>
           targets.includes(n.id)
@@ -384,7 +474,14 @@ export function Canvas() {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload),
+          signal: ac.signal,
         });
+        if (!res.ok) {
+          const j = await readJson<{ error?: string }>(res).catch(() => ({} as { error?: string }));
+          throw new Error(
+            typeof j.error === "string" ? j.error : `Run failed (${res.status})`,
+          );
+        }
         const reader = res.body!.getReader();
         const dec = new TextDecoder();
         let buf = "";
@@ -396,7 +493,12 @@ export function Canvas() {
           buf = lines.pop() ?? "";
           for (const line of lines) {
             if (!line.trim()) continue;
-            const ev = JSON.parse(line) as RunEvent;
+            let ev: RunEvent;
+            try {
+              ev = JSON.parse(line) as RunEvent;
+            } catch {
+              continue;
+            }
             if (ev.type === "delta") {
               setNodes((ns) =>
                 ns.map((n) =>
@@ -415,10 +517,9 @@ export function Canvas() {
             }
             if (ev.type === "run") {
               if (ev.status === "done" || ev.status === "error")
-                setRunsTick((t) => t + 1); // refresh run history
+                setRunsTick((t) => t + 1);
               continue;
             }
-            // node event
             setNodes((ns) =>
               ns.map((n) =>
                 n.id === ev.nodeId
@@ -444,17 +545,29 @@ export function Canvas() {
           }
         }
       } catch (e) {
-        console.error(e);
+        if (e instanceof DOMException && e.name === "AbortError") {
+          resetInFlight("idle", undefined, targets);
+          if (stoppingRef.current) toast("Run cancelled.");
+        } else {
+          const msg = e instanceof Error ? e.message : "Run failed";
+          resetInFlight("error", msg, targets);
+          toast(msg, "error");
+        }
       } finally {
-        setRunning(false);
+        inflightRef.current.delete(ac);
+        if (fullRunRef.current === ac) fullRunRef.current = null;
+        if (!inflightRef.current.size) stoppingRef.current = false;
+        setRunning(inflightRef.current.size > 0);
       }
     },
-    [setNodes, settings, graphId],
+    [setNodes, settingsApi.settings, graphId, resetInFlight],
   );
 
-  // Double-click runs a node — but not when the click lands inside an
-  // editor/control (selecting a word in a prompt, toggling media controls),
-  // which triggered accidental runs.
+  const stop = useCallback(() => {
+    stoppingRef.current = true;
+    for (const ac of inflightRef.current) ac.abort();
+  }, []);
+
   const onNodeDoubleClick = useCallback(
     (e: MouseEvent, n: FN) => {
       const el = e.target as HTMLElement | null;
@@ -465,47 +578,32 @@ export function Canvas() {
     [run],
   );
 
-  // ------- workbooks: open another / start a new one -------
   const openBook = useCallback(
     async (id: string) => {
       if (id === graphId || running) return;
-      const res = await fetch("/api/graphs");
-      const { graphs } = await res.json();
-      const g = (graphs ?? []).find((x: { id: string }) => x.id === id);
-      if (!g) return;
-      if (dirty) await save(); // flush pending changes of the current book
-      setGraphId(g.id);
-      setTitle(g.title);
-      setNodes(
-        (g.graph?.nodes ?? []).map(
-          (n: { id: string; position: { x: number; y: number }; data: FlowNodeData }) =>
-            ({ id: n.id, type: "flow", position: n.position, data: n.data }) as FN,
-        ),
-      );
-      setEdges(g.graph?.edges ?? []);
-      outputsRef.current = {}; // cached results are per-workbook
-      setDirty(false); // freshly loaded doc must not re-trigger autosave
-      if (g.graph?.viewport)
-        requestAnimationFrame(() =>
-          rf.setViewport(g.graph.viewport, { duration: 0 }),
-        );
+      if (dirty) await save();
+      router.push(`/w/${id}`);
     },
-    [graphId, running, dirty, save, rf, setNodes, setEdges],
+    [graphId, running, dirty, save, router],
   );
 
-  const newBook = useCallback(() => {
+  const newBook = useCallback(async () => {
     if (running) return;
-    setGraphId(null); // next autosave POSTs a fresh workbook
-    setTitle("Untitled");
-    const seed = starterGraph();
-    setNodes(seed.nodes);
-    setEdges(seed.edges);
-    outputsRef.current = {};
-    setDirty(true);
-    rf.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 0 });
-  }, [running, rf, setNodes, setEdges]);
+    if (dirty) await save();
+    try {
+      const res = await fetch("/api/graphs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Untitled", graph: starterGraph() }),
+      });
+      const j = await readJson<{ graph?: { id: string }; error?: string }>(res);
+      if (!res.ok || !j.graph?.id) throw new Error(j.error || "Create failed");
+      router.push(`/w/${j.graph.id}`);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Couldn’t create workbook.", "error");
+    }
+  }, [running, dirty, save, router]);
 
-  // per-node run (▶ button in node header)
   useEffect(() => {
     const onRunNode = (e: Event) => {
       const { nodeId } = (e as CustomEvent).detail;
@@ -515,7 +613,6 @@ export function Canvas() {
     return () => window.removeEventListener("flowbook:run-node", onRunNode);
   }, [run]);
 
-  // cmd/ctrl+s
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
@@ -527,7 +624,6 @@ export function Canvas() {
     return () => window.removeEventListener("keydown", onKey);
   }, [save]);
 
-  // ------- live edges: dashes flow while either end is running -------
   const statusOf = useMemo(() => {
     const m: Record<string, string> = {};
     for (const n of nodes) m[n.id] = n.data.runStatus ?? "idle";
@@ -544,155 +640,235 @@ export function Canvas() {
     [edges, statusOf],
   );
 
+  if (missing) {
+    return (
+      <StatusScreen
+        kicker="404"
+        title="This workbook isn’t here"
+        body="It may have been deleted, or the link is stale."
+        action={
+          <Link
+            href="/"
+            className="fb-btn-primary rounded-full px-4 py-2 text-[13px] font-medium"
+          >
+            Back to workbooks
+          </Link>
+        }
+      />
+    );
+  }
+
   return (
     <ModelCatalogProvider value={catalog}>
-    <div className="flex h-dvh w-full flex-col bg-canvas">
-      <PlayBar
-        title={title}
-        onTitle={(t: string) => {
-          setTitle(t);
-          touch();
-        }}
-        running={running}
-        onRun={() => run()}
-        onSave={() => save(true)}
-        saved={saved}
-        dirty={dirty}
-        books={books}
-        activeId={graphId}
-        onOpen={(id) => openBook(id)}
-        onNew={() => newBook()}
-        onSettings={() => setShowSettings(true)}
-      />
-      <div className="relative flex-1" onDrop={onDrop} onDragOver={onDragOver}>
-        <ReactFlow<FN>
-          nodes={nodes}
-          edges={styledEdges}
-          nodeTypes={nodeTypes}
-          onNodesChange={(c) => {
-            onNodesChange(c);
-            if (c.some((ch) => ch.type === "position" || ch.type === "remove"))
-              touch();
+      <div className="flex h-dvh w-full flex-col bg-canvas">
+        <PlayBar
+          title={title}
+          onTitle={(t: string) => {
+            setTitle(t);
+            touch();
           }}
-          onEdgesChange={(c) => {
-            onEdgesChange(c);
-            if (c.some((ch) => ch.type === "remove")) touch();
-          }}
-          onConnect={onConnect}
-          isValidConnection={isValidConnection}
-          onNodeDoubleClick={onNodeDoubleClick}
-          defaultEdgeOptions={{ type: "smoothstep" }}
-          fitView
-          fitViewOptions={{ padding: 0.22, maxZoom: 1 }}
-          minZoom={0.05}
-          maxZoom={4}
-          colorMode="dark"
-          zoomOnDoubleClick={false}
-          deleteKeyCode={["Backspace", "Delete"]}
-        >
-          <Background
-            variant={BackgroundVariant.Dots}
-            gap={24}
-            size={1.3}
-            color="#191b21"
-          />
-          {showMini && (
-            <MiniMap
-              pannable
-              zoomable
-              position="top-right"
-              maskColor="rgba(9,10,13,0.75)"
-              style={{
-                background: "#101218",
-                border: "1px solid #23252e",
-                borderRadius: 10,
-                marginTop: 36,
-                marginRight: 12,
-                width: 160,
-                height: 110,
-              }}
+          running={running}
+          onRun={() => run()}
+          onStop={stop}
+          onSave={() => save(true)}
+          saved={saved}
+          dirty={dirty}
+          books={books}
+          activeId={graphId}
+          onOpen={(id) => openBook(id)}
+          onNew={() => newBook()}
+          onSettings={() => settingsApi.setShowSettings(true)}
+          assistantOpen={showAssistant}
+          onAssistant={() => setShowAssistant((v) => !v)}
+        />
+        <div className="relative flex-1" onDrop={onDrop} onDragOver={onDragOver}>
+          <ReactFlow<FN>
+            nodes={nodes}
+            edges={styledEdges}
+            nodeTypes={nodeTypes}
+            onNodesChange={(c) => {
+              onNodesChange(c);
+              if (c.some((ch) => ch.type === "position" || ch.type === "remove"))
+                touch();
+            }}
+            onEdgesChange={(c) => {
+              onEdgesChange(c);
+              if (c.some((ch) => ch.type === "remove")) touch();
+            }}
+            onConnect={onConnect}
+            isValidConnection={isValidConnection}
+            onNodeDoubleClick={onNodeDoubleClick}
+            defaultEdgeOptions={{ type: "smoothstep" }}
+            fitView
+            fitViewOptions={{ padding: 0.22, maxZoom: 1 }}
+            minZoom={0.05}
+            maxZoom={4}
+            colorMode="dark"
+            zoomOnDoubleClick={false}
+            deleteKeyCode={["Backspace", "Delete"]}
+          >
+            <Background
+              variant={BackgroundVariant.Dots}
+              gap={24}
+              size={1.3}
+              color="#1c1c1c"
             />
-          )}
-          <Controls showInteractive={false} />
-          <Panel position="top-right">
-            <div className="flex items-center gap-2">
-              <RunsToggle
-                open={showRuns}
-                onToggle={() => setShowRuns((v) => !v)}
+            {showMini && (
+              <MiniMap
+                pannable
+                zoomable
+                position="top-right"
+                maskColor="rgba(9,9,9,0.75)"
+                style={{
+                  background: "#111111",
+                  border: "1px solid #222222",
+                  borderRadius: 10,
+                  marginTop: 36,
+                  marginRight: 12,
+                  width: 160,
+                  height: 110,
+                }}
               />
-              <button
-                onClick={() => setShowMini((v) => !v)}
-                title={showMini ? "Hide minimap" : "Show minimap"}
-                className={`flex h-7 w-7 items-center justify-center rounded-lg border backdrop-blur transition-colors ${
-                  showMini
-                    ? "border-line2 bg-card text-ink"
-                    : "border-line bg-card/80 text-faint hover:text-muted"
-                }`}
-              >
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
-                  <rect x="1.5" y="1.5" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.2" />
-                  <rect x="4" y="5" width="3" height="2" rx="0.6" fill="currentColor" />
-                  <rect x="8" y="8.5" width="2.5" height="2" rx="0.6" fill="currentColor" />
-                </svg>
-              </button>
-            </div>
-          </Panel>
-          {nodes.length === 0 && (
-            <Panel position="top-center">
-              <div className="fb-pop rounded-full border border-line bg-card/80 px-4 py-1.5 text-[11.5px] text-muted backdrop-blur">
-                Empty workbook — drag a node in from the panel.
+            )}
+            <Controls showInteractive={false} />
+            <Panel position="top-right">
+              <div className="flex items-center gap-2">
+                <RunsToggle
+                  open={showRuns}
+                  onToggle={() => setShowRuns((v) => !v)}
+                />
+                <button
+                  onClick={() => setShowMini((v) => !v)}
+                  title={showMini ? "Hide minimap" : "Show minimap"}
+                  className={`flex h-7 w-7 items-center justify-center rounded-lg border backdrop-blur transition-colors ${
+                    showMini
+                      ? "border-line2 bg-card text-ink"
+                      : "border-line bg-card/80 text-faint hover:text-muted"
+                  }`}
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 14 14"
+                    fill="none"
+                    aria-hidden
+                  >
+                    <rect
+                      x="1.5"
+                      y="1.5"
+                      width="11"
+                      height="11"
+                      rx="2"
+                      stroke="currentColor"
+                      strokeWidth="1.2"
+                    />
+                    <rect x="4" y="5" width="3" height="2" rx="0.6" fill="currentColor" />
+                    <rect
+                      x="8"
+                      y="8.5"
+                      width="2.5"
+                      height="2"
+                      rx="0.6"
+                      fill="currentColor"
+                    />
+                  </svg>
+                </button>
               </div>
             </Panel>
+            {ready && nodes.length === 0 && (
+              <Panel position="top-center">
+                <div className="fb-pop rounded-full border border-line bg-card/80 px-4 py-1.5 text-[11.5px] text-muted backdrop-blur">
+                  Empty workbook — drag a node in from the panel.
+                </div>
+              </Panel>
+            )}
+          </ReactFlow>
+          <Palette onAdd={addNode} defs={NODE_TYPES} />
+          {showAssistant && (
+            <AssistantPanel
+              graphId={graphId}
+              graph={{
+                nodes: nodes.map((n) => ({
+                  id: n.id,
+                  type: "flow",
+                  position: n.position,
+                  data: n.data,
+                })),
+                edges: edges.map((e) => ({
+                  id: e.id,
+                  source: e.source,
+                  sourceHandle: e.sourceHandle ?? null,
+                  target: e.target,
+                  targetHandle: e.targetHandle ?? null,
+                })),
+              }}
+              settings={settingsApi.settings}
+              onApply={(next: GraphDoc) => {
+                setNodes(
+                  next.nodes.map(
+                    (n) =>
+                      ({
+                        id: n.id,
+                        type: "flow",
+                        position: n.position,
+                        data: n.data,
+                      }) as FN,
+                  ),
+                );
+                setEdges(
+                  next.edges.map((e) => ({ ...e, type: "smoothstep" })),
+                );
+                touch();
+              }}
+              onClose={() => setShowAssistant(false)}
+            />
           )}
-        </ReactFlow>
-        <Palette onAdd={addNode} defs={NODE_TYPES} />
-        {showRuns && (
-          <div className="fb-pop absolute bottom-3 right-3 z-10 max-h-[50vh] w-80 overflow-auto rounded-xl border border-line bg-card/95 shadow-2xl backdrop-blur">
-            <div className="sticky top-0 flex items-center justify-between border-b border-line bg-card/95 px-3 py-2">
-              <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-faint">
-                Run history
-              </span>
-              <button
-                onClick={() => setShowRuns(false)}
-                className="flex h-4 w-4 items-center justify-center rounded text-faint transition-colors hover:bg-white/5 hover:text-muted"
-              >
-                <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
-                  <path d="M1.5 1.5 6.5 6.5M6.5 1.5 1.5 6.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                </svg>
-              </button>
+          {showRuns && (
+            <div className="fb-pop absolute bottom-3 right-3 z-10 max-h-[50vh] w-80 overflow-auto rounded-xl border border-line bg-card/95 shadow-2xl backdrop-blur">
+              <div className="sticky top-0 flex items-center justify-between border-b border-line bg-card/95 px-3 py-2">
+                <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-faint">
+                  Run history
+                </span>
+                <div className="flex items-center gap-2">
+                  <Link
+                    href={`/runs?graphId=${graphId}`}
+                    className="font-mono text-[9px] uppercase tracking-wider text-faint hover:text-live"
+                  >
+                    All runs
+                  </Link>
+                  <button
+                    onClick={() => setShowRuns(false)}
+                    className="flex h-4 w-4 items-center justify-center rounded text-faint transition-colors hover:bg-white/5 hover:text-muted"
+                  >
+                    <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
+                      <path
+                        d="M1.5 1.5 6.5 6.5M6.5 1.5 1.5 6.5"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <RunsPanel graphId={graphId} refreshKey={runsTick} />
             </div>
-            <RunsPanel graphId={graphId} refreshKey={runsTick} />
-          </div>
+          )}
+        </div>
+
+        {(settingsApi.showSettings || settingsApi.needsOnboard) && (
+          <SettingsModal
+            settings={settingsApi.settings}
+            env={settingsApi.env}
+            onboarding={settingsApi.needsOnboard && !settingsApi.showSettings}
+            onSave={(s) => {
+              settingsApi.persist(s);
+              reloadCatalog();
+            }}
+            onClose={settingsApi.dismissOnboard}
+          />
         )}
       </div>
-
-      {(showSettings ||
-        (booted && !hasUsableProvider(settings, env) && !onboardDismissed)) && (
-        <SettingsModal
-          settings={settings}
-          env={env}
-          onboarding={
-            booted &&
-            !hasUsableProvider(settings, env) &&
-            !onboardDismissed &&
-            !showSettings
-          }
-          onSave={(s) => {
-            setSettings(s);
-            saveSettings(s);
-            window.localStorage.setItem("flowbook.onboarded", "1");
-            setOnboardDismissed(true);
-            reloadCatalog(); // refresh provider model lists
-          }}
-          onClose={() => {
-            setShowSettings(false);
-            if (!hasUsableProvider(settings, env))
-              window.localStorage.setItem("flowbook.onboarded", "1");
-            setOnboardDismissed(true);
-          }}
-        />
-      )}
-    </div>
     </ModelCatalogProvider>
   );
 }
@@ -709,65 +885,13 @@ function RunsToggle({ open, onToggle }: { open: boolean; onToggle: () => void })
       }`}
     >
       <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>
-        <path d="M1.5 6h9M6 1.5l4.5 4.5L6 10.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" transform="rotate(45 6 6)" opacity="0" />
         <circle cx="3" cy="6" r="1.1" fill="currentColor" />
         <circle cx="6" cy="6" r="1.1" fill="currentColor" />
         <circle cx="9" cy="6" r="1.1" fill="currentColor" />
       </svg>
-      <span className="font-mono text-[9px] uppercase tracking-[0.14em]">Runs</span>
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em]">
+        Runs
+      </span>
     </button>
   );
-}
-
-function starterGraph(): { nodes: FN[]; edges: Edge[] } {
-  const b = Date.now().toString(36);
-  return {
-    nodes: [
-      {
-        id: `t${b}`,
-        type: "flow",
-        position: { x: 60, y: 150 },
-        data: {
-          kind: "text",
-          label: "Text",
-          text: "Paste an article here, then hit Run.",
-        },
-      },
-      {
-        id: `l${b}`,
-        type: "flow",
-        position: { x: 400, y: 140 },
-        data: {
-          kind: "llm",
-          label: "AI Text",
-          model: "stealth/ox-alpha",
-          prompt: "Summarize the following article in 5 bullet points:",
-        },
-      },
-      {
-        id: `o${b}`,
-        type: "flow",
-        position: { x: 750, y: 120 },
-        data: { kind: "out.text", label: "Text Out" },
-      },
-    ],
-    edges: [
-      {
-        id: `e1${b}`,
-        source: `t${b}`,
-        sourceHandle: "out",
-        target: `l${b}`,
-        targetHandle: "in",
-        type: "smoothstep",
-      },
-      {
-        id: `e2${b}`,
-        source: `l${b}`,
-        sourceHandle: "out",
-        target: `o${b}`,
-        targetHandle: "in",
-        type: "smoothstep",
-      },
-    ],
-  };
 }

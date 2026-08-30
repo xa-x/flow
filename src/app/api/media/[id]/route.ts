@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { artifacts } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { MEDIA_DIR } from "@/db";
+import { ensurePlayableAudio } from "@/lib/audio";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -24,13 +25,19 @@ export async function GET(
   const file = path.join(MEDIA_DIR, row.filename);
   if (!fs.existsSync(file)) return new Response("gone", { status: 410 });
 
-  const stat = fs.statSync(file);
-  const stream = fs.createReadStream(file);
-  return new Response(stream as unknown as ReadableStream, {
+  const raw = new Uint8Array(fs.readFileSync(file));
+  const playable =
+    row.kind === "audio"
+      ? ensurePlayableAudio(raw, row.mimeType)
+      : { data: raw, mime: row.mimeType };
+  return new Response(Buffer.from(playable.data), {
     headers: {
-      "content-type": row.mimeType,
-      "content-length": String(stat.size),
-      "cache-control": "public, max-age=31536000, immutable",
+      "content-type": playable.mime,
+      "content-length": String(playable.data.byteLength),
+      "cache-control":
+        row.kind === "audio"
+          ? "public, max-age=60, must-revalidate"
+          : "public, max-age=31536000, immutable",
     },
   });
 }

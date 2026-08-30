@@ -1,6 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
+import { Wordmark } from "./Wordmark";
+import { GearIcon } from "./AppHeader";
+import { ago } from "@/lib/format";
 
 interface Book {
   id: string;
@@ -8,20 +12,12 @@ interface Book {
   updatedAt?: string | number;
 }
 
-function ago(t?: string | number) {
-  if (!t) return "";
-  const s = Math.max(0, (Date.now() - new Date(t).getTime()) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
 export function PlayBar({
   title,
   onTitle,
   running,
   onRun,
+  onStop,
   onSave,
   saved,
   dirty,
@@ -30,11 +26,14 @@ export function PlayBar({
   onOpen,
   onNew,
   onSettings,
+  assistantOpen,
+  onAssistant,
 }: {
   title: string;
   onTitle: (t: string) => void;
   running: boolean;
   onRun: () => void;
+  onStop: () => void;
   onSave: () => void;
   saved: string | null;
   dirty: boolean;
@@ -43,25 +42,30 @@ export function PlayBar({
   onOpen: (id: string) => void;
   onNew: () => void;
   onSettings: () => void;
+  assistantOpen?: boolean;
+  onAssistant?: () => void;
 }) {
   const [menu, setMenu] = useState(false);
 
   return (
-    <header className="relative flex h-12 shrink-0 items-center gap-2 border-b border-line bg-card/60 px-4 backdrop-blur">
-      {/* wordmark */}
-      <div className="flex items-center gap-2" title="Flowbook">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-          <circle cx="3.5" cy="8" r="2.2" fill="#e2b344" />
-          <circle cx="12.5" cy="3.5" r="2.2" fill="#4a4f5e" />
-          <circle cx="12.5" cy="12.5" r="2.2" fill="#4a4f5e" />
-          <path d="M5.6 7 10.4 4.4M5.6 9l4.8 2.6" stroke="#3a3f4d" strokeWidth="1.1" />
+    <header className="relative flex h-12 shrink-0 items-center gap-2 border-b border-line bg-card/70 px-3 backdrop-blur-md">
+      <Link
+        href="/"
+        title="All workbooks"
+        className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-faint transition-colors hover:bg-white/5 hover:text-ink"
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path
+            d="M7.5 2.5 3.5 6l4 3.5"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </svg>
-        <span className="text-[13px] font-semibold tracking-wide text-ink">
-          Flowbook
-        </span>
-      </div>
+        <Wordmark compact />
+      </Link>
 
-      {/* workbook menu */}
       <div className="relative">
         <button
           onClick={() => setMenu((v) => !v)}
@@ -70,8 +74,21 @@ export function PlayBar({
           className="flex h-7 items-center gap-1 rounded-md px-1.5 text-faint transition-colors hover:bg-white/5 hover:text-ink disabled:opacity-40"
         >
           <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
-            <rect x="1.5" y="2" width="8" height="10" rx="1.4" stroke="currentColor" strokeWidth="1.2" />
-            <path d="M11.5 3.2v8.1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            <rect
+              x="1.5"
+              y="2"
+              width="8"
+              height="10"
+              rx="1.4"
+              stroke="currentColor"
+              strokeWidth="1.2"
+            />
+            <path
+              d="M11.5 3.2v8.1"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+            />
           </svg>
           <svg
             width="7"
@@ -80,15 +97,22 @@ export function PlayBar({
             aria-hidden
             className={`transition-transform ${menu ? "rotate-180" : ""}`}
           >
-            <path d="M1 2.5 4 5.5 7 2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+            <path
+              d="M1 2.5 4 5.5 7 2.5"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              fill="none"
+            />
           </svg>
         </button>
 
         {menu && (
           <>
             <div className="fixed inset-0 z-30" onClick={() => setMenu(false)} />
-            <div className="fb-pop absolute left-0 top-full z-40 mt-1.5 w-64 overflow-hidden rounded-xl border border-line bg-card/95 shadow-2xl backdrop-blur">
-              <div className="border-b border-line px-3 pb-1.5 pt-2 font-mono text-[9px] uppercase tracking-[0.18em] text-faint">
+            <div className="fb-pop absolute left-0 top-full z-40 mt-1.5 w-64 overflow-hidden rounded-xl border border-line2 bg-card shadow-2xl">
+              <div className="border-b border-line bg-sunken px-3 pb-1.5 pt-2 font-mono text-[11px] uppercase tracking-[0.16em] text-muted">
                 Workbooks
               </div>
               <div className="max-h-72 overflow-auto py-1">
@@ -130,7 +154,12 @@ export function PlayBar({
                 className="flex w-full items-center gap-2 border-t border-line px-3 py-2 text-left text-[12px] text-muted transition-colors hover:bg-white/[0.05] hover:text-accent"
               >
                 <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-                  <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                  <path
+                    d="M5 1v8M1 5h8"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                  />
                 </svg>
                 New workbook
               </button>
@@ -148,25 +177,48 @@ export function PlayBar({
         aria-label="Workbook title"
       />
 
-      <div className="ml-auto flex items-center gap-3.5">
+      <div className="ml-auto flex items-center gap-3">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-          {running ? "Running" : dirty ? "Editing…" : saved ? `Saved ${saved}` : "Saved"}
+          {running
+            ? "Running"
+            : dirty
+              ? "Editing…"
+              : saved
+                ? `Saved ${saved}`
+                : "Saved"}
         </span>
+        <Link
+          href={activeId ? `/runs?graphId=${activeId}` : "/runs"}
+          title="Run history"
+          className="hidden h-7 items-center rounded-md px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint transition-colors hover:bg-white/5 hover:text-ink sm:flex"
+        >
+          Runs
+        </Link>
+        {onAssistant && (
+          <button
+            onClick={onAssistant}
+            title={assistantOpen ? "Hide assistant" : "Build with AI"}
+            className={`flex h-7 items-center gap-1.5 rounded-md px-2 font-mono text-[10px] uppercase tracking-[0.14em] transition-colors ${
+              assistantOpen
+                ? "bg-white/10 text-ink"
+                : "text-faint hover:bg-white/5 hover:text-ink"
+            }`}
+          >
+            <span
+              className="h-1.5 w-1.5 rounded-full bg-live"
+              aria-hidden
+            />
+            Chat
+          </button>
+        )}
         <button
           onClick={onSettings}
           disabled={running}
           title="Settings — provider keys"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-faint transition-colors hover:bg-white/5 hover:text-ink disabled:opacity-40"
+          className="flex h-7 items-center gap-1.5 rounded-md px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint transition-colors hover:bg-white/5 hover:text-ink disabled:opacity-40"
         >
-          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
-            <circle cx="7" cy="7" r="2.1" stroke="currentColor" strokeWidth="1.2" />
-            <path
-              d="M7 1.2v1.6M7 11.2v1.6M12.8 7h-1.6M2.8 7H1.2M11.2 2.8l-1.1 1.1M3.9 10.1l-1.1 1.1M11.2 11.2l-1.1-1.1M3.9 3.9 2.8 2.8"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-            />
-          </svg>
+          <GearIcon />
+          <span className="hidden sm:inline">Settings</span>
         </button>
         <button
           onClick={onSave}
@@ -175,36 +227,31 @@ export function PlayBar({
         >
           Save
         </button>
-        <button
-          onClick={onRun}
-          disabled={running}
-          className={`flex items-center gap-2 rounded-full px-4 py-1.5 text-[12px] font-medium transition-all ${
-            running
-              ? "cursor-default bg-accent/15 text-accent"
-              : "bg-accent text-canvas hover:brightness-110 active:scale-[0.98]"
-          }`}
-        >
-          {running ? (
-            <>
-              <span className="fb-eq" aria-hidden>
-                <span />
-                <span />
-                <span />
-              </span>
-              Running
-            </>
-          ) : (
-            <>
-              <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden>
-                <path d="M1.5 0.8 8.5 5 1.5 9.2Z" fill="currentColor" />
-              </svg>
-              Run
-            </>
-          )}
-        </button>
+        {running ? (
+          <button
+            onClick={onStop}
+            className="flex items-center gap-2 rounded-full border border-live/40 bg-live/10 px-4 py-1.5 text-[12px] font-medium text-live transition-all hover:bg-live/15"
+          >
+            <span className="fb-eq" aria-hidden>
+              <span />
+              <span />
+              <span />
+            </span>
+            Stop
+          </button>
+        ) : (
+          <button
+            onClick={onRun}
+            className="fb-btn-primary flex items-center gap-2 rounded-full px-4 py-1.5 text-[12px] font-medium transition-all hover:brightness-110 active:scale-[0.98]"
+          >
+            <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden>
+              <path d="M1.5 0.8 8.5 5 1.5 9.2Z" fill="currentColor" />
+            </svg>
+            Run
+          </button>
+        )}
       </div>
 
-      {/* signal sweeps under the bar while the graph runs */}
       {running && <span className="fb-progress" aria-hidden />}
     </header>
   );

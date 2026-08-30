@@ -12,6 +12,7 @@ import {
 import type { ModelInfo } from "./models";
 import type { RunSettings } from "./types";
 import { PROVIDER_SPECS } from "./providers";
+import { readJson } from "./http";
 
 /**
  * Live model catalogs per provider, fetched through /api/models (which
@@ -25,7 +26,7 @@ export interface ModelCatalog {
 }
 
 const EMPTY: ModelCatalog = { models: {}, updatedAt: 0 };
-const CACHE_KEY = "flowbook.catalog.v2";
+const CACHE_KEY = "flowbook.catalog.v5";
 
 function readCache(): ModelCatalog | null {
   try {
@@ -75,7 +76,7 @@ export function useModelCatalog(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ settings }),
     })
-      .then((r) => r.json())
+      .then((r) => readJson<{ models?: Record<string, ModelInfo[]> }>(r))
       .then((data) => {
         const next: ModelCatalog = {
           models:

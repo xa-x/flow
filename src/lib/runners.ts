@@ -8,8 +8,15 @@ import type {
   UsageInfo,
 } from "./types";
 import { nodeDef } from "./nodes";
-import { saveArtifact } from "./artifacts";
-import { resolveProvider, providerSpec } from "./providers";
+import { readArtifactBytes, saveArtifact, shrinkReferenceImage } from "./artifacts";
+import { ensurePlayableAudio } from "./audio";
+import { resolveProvider, providerSpec, canonicalProviderId } from "./providers";
+import {
+  requireAspect,
+  requireDuration,
+  requireSize,
+  resolveVoice,
+} from "./media-params";
 
 /**
  * Node runners — every AI call goes through the provider registry
@@ -22,26 +29,36 @@ const DEFAULTS: Record<string, { provider: string; model: string }> = {
   llm: { provider: "openrouter", model: "stealth/ox-alpha" },
   "image.gen": {
     provider: "openrouter",
-    model: "bytedance-seed/seedream-5-0-pro",
+    model: "bytedance-seed/seedream-5-0-lite",
   },
   tts: { provider: "openrouter", model: "openai/gpt-audio-mini" },
-  "video.gen": { provider: "openrouter", model: "bytedance/seedance-2.0" },
+  "video.gen": { provider: "openrouter", model: "bytedance/seedance-2.5" },
 };
 
 export const modelFor = (d: NodeData) =>
   d.model || DEFAULTS[d.kind]?.model || "";
 
 export const providerFor = (d: NodeData) =>
-  d.provider || DEFAULTS[d.kind]?.provider || DEFAULT_PROVIDER;
+  canonicalProviderId(d.provider || DEFAULTS[d.kind]?.provider || DEFAULT_PROVIDER);
 
 /** Collect text-ish inputs (strings) into prompt parts. */
+function textInputs(inputs: Record<string, NodeOutput[]>) {
+  for (const key of ["in", "prompt", "text"] as const) {
+    const list = inputs[key];
+    if (list?.some((o) => o.type === "text" && o.text.trim())) return list;
+  }
+  return [];
+}
+
 function promptFrom(inputs: Record<string, NodeOutput[]>, data: NodeData) {
+  const incoming = textInputs(inputs)
+    .filter((o): o is { type: "text"; text: string } => o.type === "text")
+    .map((o) => o.text)
+    .join("\n\n");
+  if (data.kind === "tts") return data.prompt?.trim() || incoming;
   const parts: string[] = [];
   if (data.prompt?.trim()) parts.push(data.prompt.trim());
-  const ctx = (inputs.in ?? inputs.prompt ?? inputs.text ?? [])
-    .filter((o): o is { type: "text"; text: string } => o.type === "text")
-    .map((o) => o.text);
-  parts.push(...ctx);
+  if (incoming) parts.push(incoming);
   return parts.join("\n\n");
 }
 
@@ -134,12 +151,35 @@ export async function runNode(
 
     case "image.gen": {
       const prompt = promptFrom(inputs, data);
-      if (!prompt.trim() && !(inputs.image ?? []).length) return { outputs: [] };
+      const refs = (inputs.image ?? []).filter(
+        (o): o is { type: "image"; url?: string; artifactId?: string } =>
+          o.type === "image",
+      );
+      if (!prompt.trim() && !refs.length) return { outputs: [] };
       const p = resolveProvider(providerFor(data), settings);
       const model = modelFor(data);
+
+      const images: Array<Uint8Array | string> = [];
+      for (const ref of refs) {
+        const content = await loadImageContent(ref);
+        if (content) images.push(content);
+      }
+
+      const text =
+        prompt ||
+        (images.length
+          ? "Keep the main subject of the reference image. Replace only the background with a professional complementary scene. Output a finished photograph."
+          : "abstract composition");
+
+      const size = requireSize(data.size);
+      const aspectRatio = size ? undefined : requireAspect(data.aspectRatio);
+
       const { image } = await generateImage({
         model: p.gw.imageModel(model) as unknown as ImageModel,
-        prompt: prompt || "abstract composition",
+        prompt: images.length ? { text, images } : text,
+        maxRetries: 0,
+        ...(size ? { size } : {}),
+        ...(aspectRatio ? { aspectRatio } : {}),
       });
       const art = await saveArtifact(
         image.uint8Array,
@@ -161,6 +201,7 @@ export async function runNode(
       // OpenAI-compatible speech endpoint directly.
       const p = resolveProvider(providerFor(data), settings);
       const model = modelFor(data);
+      const voice = resolveVoice(model, data.voice);
       const res = await fetch(`${p.baseUrl.replace(/\/$/, "")}/audio/speech`, {
         method: "POST",
         headers: {
@@ -170,7 +211,8 @@ export async function runNode(
         body: JSON.stringify({
           model,
           input: prompt.slice(0, 4000),
-          voice: data.voice || "alloy",
+          response_format: "mp3",
+          ...(voice ? { voice } : {}),
         }),
       });
       if (!res.ok) {
@@ -180,9 +222,10 @@ export async function runNode(
       }
       const buf = new Uint8Array(await res.arrayBuffer());
       const mime = res.headers.get("content-type") || "audio/mpeg";
-      if (mime.includes("json"))
+      if (mime.includes("json") || mime.includes("application/json"))
         throw new Error("TTS returned JSON, expected audio");
-      const art = await saveArtifact(buf, mime, "audio");
+      const playable = ensurePlayableAudio(buf, mime);
+      const art = await saveArtifact(playable.data, playable.mime, "audio");
       return {
         outputs: [
           { type: "audio", artifactId: art.id, url: `/api/media/${art.id}` },
@@ -218,10 +261,17 @@ export async function runNode(
           ]
         : undefined;
 
+      const aspectRatio = requireAspect(data.aspectRatio);
+      const resolution = requireSize(data.resolution, "resolution");
+      const duration = requireDuration(data.duration);
+
       const { videos } = await experimental_generateVideo({
         model: p.gw.videoModel(model),
         prompt: prompt || "",
         frameImages,
+        ...(aspectRatio ? { aspectRatio } : {}),
+        ...(resolution ? { resolution } : {}),
+        ...(duration ? { duration } : {}),
         download: async ({ url }) => {
           const r = await fetch(url);
           return {
@@ -266,6 +316,21 @@ function absoluteUrl(p?: string) {
   const path = p ?? "";
   const base = process.env.FLOWBOOK_URL ?? "http://localhost:3000";
   return path.startsWith("http") ? path : `${base}${path}`;
+}
+
+async function loadImageContent(img: {
+  url?: string;
+  artifactId?: string;
+}): Promise<Uint8Array | string | null> {
+  const id =
+    img.artifactId ?? img.url?.match(/\/api\/media\/([^/?#]+)/)?.[1];
+  if (id) {
+    const hit = await readArtifactBytes(id);
+    if (hit) return shrinkReferenceImage(hit.data);
+  }
+  if (img.url?.startsWith("http")) return img.url;
+  if (img.url) return absoluteUrl(img.url);
+  return null;
 }
 
 export { nodeDef };

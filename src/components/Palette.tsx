@@ -24,7 +24,7 @@ export function Palette({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="fb-pop absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-full border border-line bg-card/90 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-muted shadow-lg backdrop-blur transition-colors hover:border-line2 hover:text-ink"
+        className="fb-pop absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-full border border-line bg-card/90 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-muted shadow-lg shadow-black/40 backdrop-blur transition-colors hover:border-line2 hover:text-ink"
       >
         <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden>
           <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
@@ -34,7 +34,7 @@ export function Palette({
     );
 
   return (
-    <aside className="absolute left-3 top-3 z-10 w-44 select-none rounded-xl border border-line bg-card/90 py-2 shadow-xl backdrop-blur">
+    <aside className="absolute left-3 top-3 z-10 w-44 select-none rounded-xl border border-line bg-card/90 py-2 shadow-xl shadow-black/40 backdrop-blur">
       <div className="mb-1.5 flex items-center justify-between px-2.5 pl-3">
         <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-faint">
           Nodes
@@ -82,6 +82,9 @@ export function Palette({
           </div>
         );
       })}
+      <p className="mx-2.5 mt-1 border-t border-line px-0.5 pt-2 font-mono text-[8.5px] uppercase tracking-[0.16em] text-faint/80">
+        Or open Chat to build
+      </p>
     </aside>
   );
 }

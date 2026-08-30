@@ -27,10 +27,14 @@ export function loadSettings(): RunSettings {
     if (parsed.providers && typeof parsed.providers === "object") {
       for (const [id, cfg] of Object.entries(parsed.providers)) {
         if (!cfg || typeof cfg !== "object") continue;
-        out.providers[id] = {
+        const dest = id === "pyk" ? "pyok" : id;
+        const next = {
           baseUrl: typeof cfg.baseUrl === "string" ? cfg.baseUrl : "",
           apiKey: typeof cfg.apiKey === "string" ? cfg.apiKey : "",
         };
+        const existing = out.providers[dest];
+        const empty = !existing?.baseUrl && !existing?.apiKey;
+        if (empty) out.providers[dest] = next;
       }
     }
     return out;

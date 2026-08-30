@@ -26,14 +26,33 @@ export const PROVIDER_SPECS: ProviderSpec[] = [
     defaultBaseUrl: "https://openrouter.ai/api/v1",
   },
   {
-    id: "pyk",
-    label: "PYK Gateway",
+    id: "pyok",
+    label: "PYOK",
     needsBaseUrl: true,
     caps: ["chat", "image"],
   },
 ];
 
-export const providerSpec = (id: string) => PROVIDER_SPECS.find((p) => p.id === id);
+/** Older id `pyk` still resolves to PYOK. */
+const PROVIDER_ALIASES: Record<string, string> = { pyk: "pyok" };
+
+export const canonicalProviderId = (id: string) =>
+  PROVIDER_ALIASES[id] ?? id;
+
+export const providerSpec = (id: string) =>
+  PROVIDER_SPECS.find((p) => p.id === canonicalProviderId(id));
+
+export function envValue(id: string, suffix: "BASE_URL" | "API_KEY"): string {
+  const canon = canonicalProviderId(id);
+  const keys = [`${canon.toUpperCase()}_${suffix}`];
+  if (canon === "pyok") keys.push(`PYK_${suffix}`);
+  if (id !== canon) keys.push(`${id.toUpperCase()}_${suffix}`);
+  for (const k of keys) {
+    const v = process.env[k];
+    if (v) return v;
+  }
+  return "";
+}
 
 export interface ResolvedProvider {
   id: ProviderId;
@@ -47,22 +66,21 @@ const cache = new Map<string, ResolvedProvider>();
 /**
  * Resolve a provider from client-sent settings with server .env fallback:
  *   openrouter → OPENROUTER_API_KEY
- *   pyk        → PYK_BASE_URL + PYK_API_KEY
+ *   pyok       → PYOK_BASE_URL + PYOK_API_KEY (PYK_* still accepted)
  * Unknown/custom ids: <ID>_BASE_URL + <ID>_API_KEY (e.g. ZAI_BASE_URL).
  */
 export function resolveProvider(
   id: string,
   settings?: RunSettings,
 ): ResolvedProvider {
-  const pid = (id || "openrouter") as ProviderId;
+  const pid = canonicalProviderId(id || "openrouter") as ProviderId;
   const spec = providerSpec(pid);
-  const envBase = `${pid.toUpperCase()}_BASE_URL`;
-  const envKey = `${pid.toUpperCase()}_API_KEY`;
 
-  const s = settings?.providers?.[pid];
-  const baseUrl =
-    s?.baseUrl || process.env[envBase] || spec?.defaultBaseUrl || "";
-  const apiKey = s?.apiKey || process.env[envKey] || "";
+  const s =
+    settings?.providers?.[pid] ??
+    (pid === "pyok" ? settings?.providers?.pyk : undefined);
+  const baseUrl = s?.baseUrl || envValue(id, "BASE_URL") || spec?.defaultBaseUrl || "";
+  const apiKey = s?.apiKey || envValue(id, "API_KEY") || "";
 
   if (!apiKey)
     throw new Error(
@@ -91,11 +109,12 @@ export function resolveProvider(
 export function configuredProviders(settings?: RunSettings): ProviderId[] {
   const out: ProviderId[] = [];
   for (const spec of PROVIDER_SPECS) {
-    const envBase = `${spec.id.toUpperCase()}_BASE_URL`;
-    const envKey = `${spec.id.toUpperCase()}_API_KEY`;
-    const s = settings?.providers?.[spec.id];
-    const hasBase = !!s?.baseUrl || !!process.env[envBase] || !!spec.defaultBaseUrl;
-    const hasKey = !!s?.apiKey || !!process.env[envKey];
+    const s =
+      settings?.providers?.[spec.id] ??
+      (spec.id === "pyok" ? settings?.providers?.pyk : undefined);
+    const hasBase =
+      !!s?.baseUrl || !!envValue(spec.id, "BASE_URL") || !!spec.defaultBaseUrl;
+    const hasKey = !!s?.apiKey || !!envValue(spec.id, "API_KEY");
     if (hasBase || hasKey) out.push(spec.id);
   }
   return out;
@@ -105,10 +124,23 @@ export function configuredProviders(settings?: RunSettings): ProviderId[] {
 export function envProviderFlags(): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const spec of PROVIDER_SPECS) {
-    const envKey = `${spec.id.toUpperCase()}_API_KEY`;
-    out[spec.id] = !!process.env[envKey];
+    out[spec.id] = !!envValue(spec.id, "API_KEY");
   }
   return out;
+}
+
+export function providerCreds(id: string, settings?: RunSettings) {
+  const pid = canonicalProviderId(id);
+  const spec = providerSpec(pid);
+  const s =
+    settings?.providers?.[pid] ??
+    (pid === "pyok" ? settings?.providers?.pyk : undefined);
+  return {
+    id: pid,
+    spec,
+    baseUrl: s?.baseUrl || envValue(id, "BASE_URL") || spec?.defaultBaseUrl || "",
+    apiKey: s?.apiKey || envValue(id, "API_KEY") || "",
+  };
 }
 
 export type { ProviderConfig };

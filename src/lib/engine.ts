@@ -4,6 +4,7 @@ import { nodeDef } from "./nodes";
 import { db } from "@/db";
 import { runs, runNodes } from "@/db/schema";
 import { newId } from "./artifacts";
+import { downstreamIds } from "./graph";
 
 const MAX_CONCURRENCY = 4;
 
@@ -15,12 +16,14 @@ const MAX_CONCURRENCY = 4;
  * deltas + usage) stream back to the canvas.
  *
  * `only` = run a single node (inputs come from `cached` upstream outputs).
+ * `from` = run that node and every descendant (other branches keep going).
  */
 export async function* executeGraph(
   graph: GraphDoc,
   opts: {
     graphId?: string;
     only?: string;
+    from?: string;
     cached?: Record<string, NodeOutput[]>;
     settings?: RunSettings;
   } = {},
@@ -90,8 +93,8 @@ export async function* executeGraph(
           id: runId,
           graphId: opts.graphId,
           status,
-          trigger: opts.only ? "node" : "manual",
-          only: opts.only ?? null,
+          trigger: opts.only || opts.from ? "node" : "manual",
+          only: opts.only ?? opts.from ?? null,
           totalCostUsd: Math.round(totals.costUsd * 1e6), // micro-dollars
           totalTokens: totals.tokens,
           durationMs: Date.now() - runStarted,
@@ -160,10 +163,26 @@ export async function* executeGraph(
     const pending: string[] = [];
 
     const released = new Set<string>();
+
+    const scope = opts.only
+      ? new Set([opts.only])
+      : opts.from && nodes.has(opts.from)
+        ? new Set(downstreamIds(opts.from, edges))
+        : null;
+
+    if (scope) {
+      for (const id of scope) inDeg.set(id, 0);
+      for (const e of edges) {
+        if (scope.has(e.source) && scope.has(e.target))
+          inDeg.set(e.target, (inDeg.get(e.target) ?? 0) + 1);
+      }
+    }
+
     const release = (id: string) => {
       if (released.has(id)) return;
       released.add(id);
       for (const t of outgoing.get(id) ?? []) {
+        if (scope && !scope.has(t)) continue;
         const d = (inDeg.get(t) ?? 1) - 1;
         inDeg.set(t, d);
         if (d === 0) pending.push(t);
@@ -172,6 +191,9 @@ export async function* executeGraph(
 
     if (opts.only) {
       pending.push(opts.only);
+    } else if (scope) {
+      for (const id of scope)
+        if ((inDeg.get(id) ?? 0) === 0) pending.push(id);
     } else {
       for (const n of graph.nodes)
         if ((inDeg.get(n.id) ?? 0) === 0) pending.push(n.id);

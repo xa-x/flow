@@ -4,7 +4,7 @@ export type NodeOutput =
   | { type: "audio"; artifactId?: string; url?: string }
   | { type: "video"; artifactId?: string; url?: string };
 
-export type ProviderId = string; // "openrouter" | "pyk" | any custom gateway id
+export type ProviderId = string; // "openrouter" | "pyok" | any custom gateway id
 
 /** Per-provider credentials, stored in the client's Settings. */
 export interface ProviderConfig {
@@ -31,7 +31,11 @@ export interface NodeData {
   prompt?: string; // llm/image/video instruction
   model?: string; // model id
   provider?: ProviderId; // provider id (registry)
-  voice?: string; // tts voice
+  voice?: string; // tts voice — omit for model default
+  size?: string; // image/video WxH, e.g. 1024x1024
+  aspectRatio?: string; // e.g. 16:9
+  duration?: number; // video seconds
+  resolution?: string; // video WxH, e.g. 1920x1080
   temperature?: number;
   artifactId?: string; // uploaded media
   // runtime decoration (not persisted into node defs):
