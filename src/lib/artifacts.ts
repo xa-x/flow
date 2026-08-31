@@ -1,20 +1,15 @@
 import { db } from "@/db";
 import { artifacts } from "@/db/schema";
-import { MEDIA_DIR } from "@/db";
 import { eq } from "drizzle-orm";
 import { execFileSync } from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { newId } from "./ids";
+import { mediaKey, objectStore } from "./storage";
 
-export function newId(len = 12) {
-  const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
-  const bytes = crypto.randomBytes(len);
-  let out = "";
-  for (let i = 0; i < len; i++) out += alphabet[bytes[i] % alphabet.length];
-  return out;
-}
+export { newId };
 
 const EXT: Record<string, string> = {
   "image/png": "png",
@@ -32,13 +27,15 @@ export async function saveArtifact(
   mimeType: string,
   kind: "image" | "audio" | "video",
   runId?: string,
+  orgId = "",
 ) {
   const id = newId();
   const ext = EXT[mimeType] ?? (kind === "image" ? "png" : kind === "audio" ? "mp3" : "mp4");
-  const filename = `${id}.${ext}`;
-  fs.writeFileSync(path.join(MEDIA_DIR, filename), buf);
+  const filename = mediaKey(orgId, `${id}.${ext}`);
+  await objectStore.put(filename, buf);
   await db.insert(artifacts).values({
     id,
+    orgId,
     runId,
     kind,
     mimeType,
@@ -55,12 +52,9 @@ export async function readArtifactBytes(id: string) {
     .where(eq(artifacts.id, id))
     .limit(1);
   if (!row) return null;
-  const file = path.join(MEDIA_DIR, row.filename);
-  if (!fs.existsSync(file)) return null;
-  return {
-    data: new Uint8Array(fs.readFileSync(file)),
-    mimeType: row.mimeType,
-  };
+  const data = await objectStore.get(row.filename);
+  if (!data) return null;
+  return { data, mimeType: row.mimeType, orgId: row.orgId };
 }
 
 const MAX_REF_BYTES = 900_000;

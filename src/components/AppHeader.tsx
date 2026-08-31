@@ -7,7 +7,7 @@ export function AppHeader({
   active,
   onSettings,
 }: {
-  active: "home" | "runs";
+  active: "home" | "runs" | "billing";
   onSettings?: () => void;
 }) {
   return (
@@ -21,6 +21,9 @@ export function AppHeader({
         </NavLink>
         <NavLink href="/runs" current={active === "runs"}>
           Runs
+        </NavLink>
+        <NavLink href="/billing" current={active === "billing"}>
+          Plan
         </NavLink>
       </nav>
       {onSettings && (

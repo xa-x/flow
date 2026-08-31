@@ -20,6 +20,14 @@ export interface BookMeta {
   nodeCount?: number;
   edgeCount?: number;
   kinds?: string[];
+  lastRun?: {
+    id: string;
+    status: string;
+    trigger: string;
+    startedAt?: string | number;
+    error?: string | null;
+  } | null;
+  nextRunAt?: string | number | null;
 }
 
 export function HomeGallery() {
@@ -81,6 +89,33 @@ export function HomeGallery() {
     }
   };
 
+  const duplicate = async (id: string) => {
+    try {
+      const res = await fetch(`/api/graphs/${id}/duplicate`, { method: "POST" });
+      const j = await readJson<{ graph?: { id: string }; error?: string }>(res);
+      if (!res.ok || !j.graph?.id) throw new Error(j.error || "Duplicate failed");
+      router.push(`/w/${j.graph.id}`);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Couldn’t duplicate.", "error");
+    }
+  };
+
+  const importFile = async (file: File) => {
+    try {
+      const pack = JSON.parse(await file.text());
+      const res = await fetch("/api/graphs/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(pack),
+      });
+      const j = await readJson<{ graph?: { id: string }; error?: string }>(res);
+      if (!res.ok || !j.graph?.id) throw new Error(j.error || "Import failed");
+      router.push(`/w/${j.graph.id}`);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Couldn’t import workbook.", "error");
+    }
+  };
+
   const remove = async (id: string) => {
     try {
       const res = await fetch(`/api/graphs?id=${encodeURIComponent(id)}`, {
@@ -117,6 +152,19 @@ export function HomeGallery() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <label className="rounded-full border border-line bg-card px-4 py-2 text-[13px] font-medium text-ink transition-all hover:border-line2">
+              Import
+              <input
+                type="file"
+                accept="application/json"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void importFile(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
             <button
               onClick={() => create("ai")}
               disabled={!!creating}
@@ -174,7 +222,12 @@ export function HomeGallery() {
           <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {books.map((b) => (
               <li key={b.id}>
-                <BookCard book={b} onRename={rename} onDelete={remove} />
+                <BookCard
+                  book={b}
+                  onRename={rename}
+                  onDelete={remove}
+                  onDuplicate={duplicate}
+                />
               </li>
             ))}
           </ul>
@@ -194,14 +247,23 @@ export function HomeGallery() {
   );
 }
 
+function statusTone(status?: string) {
+  if (status === "done" || status === "succeeded") return "bg-ok";
+  if (status === "error" || status === "failed") return "bg-err";
+  if (status === "running" || status === "queued") return "bg-live";
+  return "bg-faint";
+}
+
 function BookCard({
   book,
   onRename,
   onDelete,
+  onDuplicate,
 }: {
   book: BookMeta;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
+  onDuplicate: (id: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(book.title);
@@ -247,6 +309,13 @@ function BookCard({
           )}
           <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
             <button
+              onClick={() => onDuplicate(book.id)}
+              title="Duplicate"
+              className="rounded-md px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-faint hover:bg-white/5 hover:text-ink"
+            >
+              Copy
+            </button>
+            <button
               onClick={() => {
                 setDraft(book.title);
                 setEditing(true);
@@ -275,12 +344,17 @@ function BookCard({
           </div>
         </div>
 
-        <p className="mt-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-          {ago(book.updatedAt) || "just now"}
+        <p className="mt-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${statusTone(book.lastRun?.status)}`}
+            title={book.lastRun?.status ?? "never run"}
+          />
+          {book.lastRun
+            ? `${book.lastRun.status} · ${ago(book.lastRun.startedAt)}`
+            : "never run"}
+          {book.nextRunAt ? ` · next ${ago(book.nextRunAt)}` : ""}
           {typeof book.nodeCount === "number" &&
             ` · ${book.nodeCount} node${book.nodeCount === 1 ? "" : "s"}`}
-          {typeof book.edgeCount === "number" &&
-            ` · ${book.edgeCount} edge${book.edgeCount === 1 ? "" : "s"}`}
         </p>
 
         <div className="mt-3 flex flex-wrap gap-1.5">

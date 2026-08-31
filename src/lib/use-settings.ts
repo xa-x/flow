@@ -44,6 +44,11 @@ export function useSettings() {
     saveSettings(s);
     window.localStorage.setItem("flowbook.onboarded", "1");
     setOnboardDismissed(true);
+    void fetch("/api/credentials", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(s),
+    }).catch(() => {});
   };
 
   const dismissOnboard = () => {

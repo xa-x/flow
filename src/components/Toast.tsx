@@ -4,9 +4,13 @@ import { useEffect, useState } from "react";
 
 export type ToastKind = "error" | "ok" | "info";
 
-export function toast(message: string, kind: ToastKind = "info") {
+export function toast(
+  message: string,
+  kind: ToastKind = "info",
+  action?: { label: string; onClick: () => void },
+) {
   window.dispatchEvent(
-    new CustomEvent("flowbook:toast", { detail: { message, kind } }),
+    new CustomEvent("flowbook:toast", { detail: { message, kind, action } }),
   );
 }
 
@@ -14,6 +18,7 @@ interface ToastItem {
   id: number;
   message: string;
   kind: ToastKind;
+  action?: { label: string; onClick: () => void };
 }
 
 export function ToastHost() {
@@ -21,13 +26,14 @@ export function ToastHost() {
 
   useEffect(() => {
     const onToast = (e: Event) => {
-      const { message, kind } = (e as CustomEvent).detail as {
+      const { message, kind, action } = (e as CustomEvent).detail as {
         message: string;
         kind?: ToastKind;
+        action?: { label: string; onClick: () => void };
       };
       if (!message) return;
       const id = Date.now() + Math.random();
-      setItems((xs) => [...xs, { id, message, kind: kind ?? "info" }]);
+      setItems((xs) => [...xs, { id, message, kind: kind ?? "info", action }]);
       window.setTimeout(() => {
         setItems((xs) => xs.filter((t) => t.id !== id));
       }, 4200);
@@ -51,7 +57,20 @@ export function ToastHost() {
                 : "border-line bg-card/95 text-ink"
           }`}
         >
-          {t.message}
+          <div className="flex items-center justify-between gap-3">
+            <span>{t.message}</span>
+            {t.action && (
+              <button
+                onClick={() => {
+                  t.action?.onClick();
+                  setItems((xs) => xs.filter((x) => x.id !== t.id));
+                }}
+                className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-live"
+              >
+                {t.action.label}
+              </button>
+            )}
+          </div>
         </div>
       ))}
     </div>

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { RunSettings } from "@/lib/types";
 import { PROVIDER_SPECS, providerSpec } from "@/lib/providers";
+import { useTheme } from "./ThemeProvider";
 
 /**
  * Local provider credentials. Saved to this browser's localStorage and
@@ -32,6 +33,7 @@ export function SettingsModal({
       },
     }));
 
+  const theme = useTheme();
   const field =
     "w-full rounded-md border border-line bg-sunken px-2.5 py-2 font-mono text-[11px] text-ink/90 outline-none transition-colors placeholder:text-faint focus:border-accent";
 
@@ -130,9 +132,30 @@ export function SettingsModal({
             );
           })}
 
+          <div>
+            <p className="mb-2 font-mono text-[9.5px] uppercase tracking-[0.16em] text-muted">
+              Appearance
+            </p>
+            <div className="flex gap-1">
+              {(["system", "light", "dark"] as const).map((opt) => (
+                <button
+                  key={opt}
+                  onClick={() => theme.setPref(opt)}
+                  className={`rounded-full px-3 py-1 font-mono text-[10px] uppercase tracking-wider ${
+                    theme.pref === opt
+                      ? "bg-ink text-canvas"
+                      : "border border-line text-muted"
+                  }`}
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <p className="text-[10.5px] leading-snug text-faint">
-            Keys are stored only in this browser and sent with each run.
-            Values from the server&apos;s .env are used when fields stay empty.
+            Keys are saved to this workspace vault for server-side runs.
+            Browser values remain a fallback. Server .env is used when both are empty.
           </p>
         </div>
 

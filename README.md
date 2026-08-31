@@ -88,3 +88,7 @@ npx drizzle-kit push
 | `GET /api/media/[id]` | stream a stored artifact                    |
 | `GET /api/config` | which providers have server-side keys            |
 | `GET /api/health` | liveness                                         |
+| `POST /api/runs` | enqueue a durable run (`202 { runId }`)          |
+| `GET /api/runs/[id]/events` | SSE event stream + reconnect (`?after=`) |
+| `POST /api/mcp` | scoped MCP tools for agents                      |
+| `POST /api/webhooks/[token]` | signed workbook trigger                   |

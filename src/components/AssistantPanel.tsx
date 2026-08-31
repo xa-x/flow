@@ -19,12 +19,14 @@ export function AssistantPanel({
   graphId,
   graph,
   settings,
+  selectedNodeIds,
   onApply,
   onClose,
 }: {
   graphId: string;
   graph: GraphDoc;
   settings?: RunSettings;
+  selectedNodeIds?: string[];
   onApply: (next: GraphDoc) => void;
   onClose: () => void;
 }) {
@@ -130,6 +132,8 @@ export function AssistantPanel({
             mentions: m,
           })),
           graph,
+          graphId,
+          selectedNodeIds,
           settings,
         }),
       });

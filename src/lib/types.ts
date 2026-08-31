@@ -100,8 +100,17 @@ export type RunEvent =
   | {
       type: "run";
       runId: string;
-      status: "done" | "error";
+      status: "done" | "error" | "cancelled" | "timed_out";
       error?: string;
       usage?: { totalCostUsd?: number; totalTokens?: number; durationMs?: number };
       ts: number;
     };
+
+export type ConsoleEvent = {
+  seq: number;
+  type: string;
+  level: string;
+  nodeId?: string | null;
+  payload: Record<string, unknown>;
+  ts: number;
+};

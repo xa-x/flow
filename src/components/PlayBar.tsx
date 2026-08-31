@@ -28,6 +28,7 @@ export function PlayBar({
   onSettings,
   assistantOpen,
   onAssistant,
+  onShare,
 }: {
   title: string;
   onTitle: (t: string) => void;
@@ -44,6 +45,7 @@ export function PlayBar({
   onSettings: () => void;
   assistantOpen?: boolean;
   onAssistant?: () => void;
+  onShare?: () => void;
 }) {
   const [menu, setMenu] = useState(false);
 
@@ -194,6 +196,14 @@ export function PlayBar({
         >
           Runs
         </Link>
+        {onShare && (
+          <button
+            onClick={onShare}
+            className="hidden h-7 items-center rounded-md px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint transition-colors hover:bg-white/5 hover:text-ink sm:flex"
+          >
+            Share
+          </button>
+        )}
         {onAssistant && (
           <button
             onClick={onAssistant}

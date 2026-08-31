@@ -1,10 +1,13 @@
+import { eq } from "drizzle-orm";
 import type { GraphDoc, NodeOutput, RunEvent, RunSettings, UsageInfo } from "./types";
 import { runNode, providerFor, modelFor } from "./runners";
 import { nodeDef } from "./nodes";
 import { db } from "@/db";
 import { runs, runNodes } from "@/db/schema";
-import { newId } from "./artifacts";
+import { newId } from "./ids";
 import { downstreamIds } from "./graph";
+import { appendEvent } from "./runs/events";
+import { recordUsage } from "./runs/enqueue";
 
 const MAX_CONCURRENCY = 4;
 
@@ -22,13 +25,17 @@ export async function* executeGraph(
   graph: GraphDoc,
   opts: {
     graphId?: string;
+    orgId?: string;
+    runId?: string;
     only?: string;
     from?: string;
     cached?: Record<string, NodeOutput[]>;
     settings?: RunSettings;
+    signal?: AbortSignal;
   } = {},
 ): AsyncGenerator<RunEvent> {
-  const runId = newId();
+  const runId = opts.runId ?? newId();
+  const orgId = opts.orgId ?? "";
   const nodes = new Map(graph.nodes.map((n) => [n.id, n]));
   const edges = graph.edges.filter(
     (e) => nodes.has(e.source) && nodes.has(e.target),
@@ -60,6 +67,16 @@ export async function* executeGraph(
   const emit = (e: RunEvent) => {
     queue.push(e);
     notify?.();
+    if (orgId) {
+      const nodeId = "nodeId" in e ? e.nodeId : undefined;
+      void appendEvent(orgId, runId, {
+        type: e.type,
+        level: e.type === "node" && "status" in e && e.status === "error" ? "error" : "info",
+        nodeId,
+        payload: e as unknown as Record<string, unknown>,
+        ts: e.ts,
+      });
+    }
   };
 
   const gatherInputs = (nodeId: string) => {
@@ -84,25 +101,59 @@ export async function* executeGraph(
   // ---- run persistence (best effort — never block execution) ----
   const totals = { costUsd: 0, tokens: 0 };
   const runStarted = Date.now();
+  const isCancelled = async () => {
+    if (opts.signal?.aborted) return true;
+    if (!opts.graphId) return false;
+    const [row] = await db
+      .select({ c: runs.cancelRequested })
+      .from(runs)
+      .where(eq(runs.id, runId))
+      .limit(1);
+    return !!row?.c;
+  };
+
   const persistRun = async (status: string, error?: string) => {
     if (!opts.graphId) return;
     try {
+      const finished = ["done", "error", "cancelled", "timed_out"].includes(status);
       await db
         .insert(runs)
         .values({
           id: runId,
+          orgId,
           graphId: opts.graphId,
           status,
           trigger: opts.only || opts.from ? "node" : "manual",
           only: opts.only ?? opts.from ?? null,
-          totalCostUsd: Math.round(totals.costUsd * 1e6), // micro-dollars
+          totalCostUsd: Math.round(totals.costUsd * 1e6),
           totalTokens: totals.tokens,
           durationMs: Date.now() - runStarted,
           error: error ?? null,
+          heartbeatAt: new Date(),
           startedAt: new Date(runStarted),
-          finishedAt: new Date(),
+          finishedAt: finished ? new Date() : null,
         })
-        .onConflictDoNothing();
+        .onConflictDoUpdate({
+          target: runs.id,
+          set: {
+            status,
+            orgId,
+            totalCostUsd: Math.round(totals.costUsd * 1e6),
+            totalTokens: totals.tokens,
+            durationMs: Date.now() - runStarted,
+            error: error ?? null,
+            heartbeatAt: new Date(),
+            finishedAt: finished ? new Date() : null,
+          },
+        });
+      if (orgId && finished && (totals.costUsd || totals.tokens)) {
+        await recordUsage({
+          orgId,
+          runId,
+          amountUsd: Math.round(totals.costUsd * 1e6),
+          tokens: totals.tokens,
+        });
+      }
     } catch {
       /* best effort */
     }
@@ -122,6 +173,7 @@ export async function* executeGraph(
         .insert(runNodes)
         .values({
           id: `${runId}:${nodeId}`,
+          orgId,
           runId,
           graphId: opts.graphId,
           nodeId,
@@ -156,7 +208,8 @@ export async function* executeGraph(
   };
 
   // scheduler (detached)
-  const state = { failedAny: false };
+  const state = { failedAny: false, cancelled: false };
+  void persistRun("running");
   const schedule = (async () => {
     const failed = new Set<string>();
     const settled = new Set<string>();
@@ -237,6 +290,10 @@ export async function* executeGraph(
 
     const executing = new Set<Promise<void>>();
     while (pending.length || executing.size) {
+      if (await isCancelled()) {
+        state.cancelled = true;
+        break;
+      }
       while (pending.length && executing.size < MAX_CONCURRENCY) {
         const id = pending.shift()!;
         if (settled.has(id)) continue;
@@ -252,6 +309,7 @@ export async function* executeGraph(
               error: "skipped: upstream failed",
               ts: Date.now(),
             });
+            await persistNode(id, "skipped", undefined, "skipped: upstream failed");
             release(id);
             continue;
           }
@@ -274,7 +332,7 @@ export async function* executeGraph(
     })
     .finally(async () => {
       finished = true;
-      const status = state.failedAny ? "error" : "done";
+      const status = state.cancelled ? "cancelled" : state.failedAny ? "error" : "done";
       await persistRun(status);
       emit({
         type: "run",

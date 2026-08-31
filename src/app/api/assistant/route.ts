@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { streamText } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
+import { desc, eq } from "drizzle-orm";
 import {
   nodeCatalogPrompt,
   parseAssistantOutput,
@@ -9,6 +10,10 @@ import {
 } from "@/lib/assistant";
 import { resolveProvider } from "@/lib/providers";
 import type { GraphDoc, ProviderConfig, RunSettings } from "@/lib/types";
+import { requireActor } from "@/lib/auth";
+import { loadOrgSettings, mergeSettings } from "@/lib/vault";
+import { db } from "@/db";
+import { runNodes, runs } from "@/db/schema";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -31,6 +36,8 @@ const incoming = z.object({
       }),
     )
     .min(1),
+  graphId: z.string().optional(),
+  selectedNodeIds: z.array(z.string()).optional(),
   graph: z
     .object({
       nodes: z.array(z.unknown()),
@@ -150,7 +157,37 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const settings = settingsFrom(body);
+  let actor;
+  try {
+    actor = await requireActor(req);
+  } catch {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const vault = await loadOrgSettings(actor.org.id);
+  const settings = mergeSettings(vault, settingsFrom(body));
+
+  let runContext = "(no recent run)";
+  if (body.graphId) {
+    const [last] = await db
+      .select()
+      .from(runs)
+      .where(eq(runs.graphId, body.graphId))
+      .orderBy(desc(runs.startedAt))
+      .limit(1);
+    if (last && last.orgId === actor.org.id) {
+      const nodes = await db.select().from(runNodes).where(eq(runNodes.runId, last.id));
+      runContext = `Last run ${last.id} status=${last.status} trigger=${last.trigger} error=${last.error ?? ""}\n${nodes
+        .map(
+          (n) =>
+            `- node=${n.nodeId} status=${n.status} err=${n.error ?? ""} model=${n.model ?? ""}`,
+        )
+        .join("\n")}`;
+    }
+  }
+  const selected = (body.selectedNodeIds ?? []).join(", ") || "(none)";
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -179,10 +216,18 @@ ${nodeCatalogPrompt()}
 Current graph:
 ${graphSummary(body.graph)}
 
+Selected nodes: ${selected}
+
+Latest run:
+${runContext}
+
 Rules:
 - Reply in the user's language.
 - Use ops to create or edit the graph. Prefer add_node + connect over describing steps the user must do by hand.
+- Edit the existing workbook in place. Do not rebuild from scratch unless the user asks.
 - When the user @mentions a node, update that node (or nodes connected to it) instead of rebuilding the whole graph.
+- Prefer update_node over remove_node + add_node.
+- Use last-run errors to decide what to fix.
 - For image-edit workflows: Image (image.in) → AI Image (image.gen, connect image to the "image"/Reference handle, prompt to "prompt") → Media Out (out.media).
 - Use stable short ids on add_node (e.g. "prompt1", "img1") and reference those same ids in connect/update/remove.
 - Use the correct handle ids from the catalog. Connect matching types only (text→text, image→image).

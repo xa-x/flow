@@ -112,7 +112,7 @@ export function parseAspect(raw?: string): AspectSpec | undefined {
   if (!raw?.trim()) return;
   const m = raw.trim().match(/^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)$/);
   if (!m) return;
-  return `${m[1]}:${m[2]}`;
+  return `${Number(m[1])}:${Number(m[2])}`;
 }
 
 export function parseDuration(raw?: number | string): number | undefined {

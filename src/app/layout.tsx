@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ToastHost } from "@/components/Toast";
+import { ThemeProvider } from "@/components/ThemeProvider";
 import "./globals.css";
 
 const geist = Geist({
@@ -29,8 +30,10 @@ export default function RootLayout({
       <body
         className={`${geist.variable} ${geistMono.variable} font-sans antialiased`}
       >
-        {children}
-        <ToastHost />
+        <ThemeProvider>
+          {children}
+          <ToastHost />
+        </ThemeProvider>
       </body>
     </html>
   );

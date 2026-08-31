@@ -40,6 +40,8 @@ import { ModelCatalogProvider, useModelCatalog } from "@/lib/model-catalog";
 import { starterGraph } from "@/lib/starter";
 import { downstreamIds } from "@/lib/graph";
 import { useSettings } from "@/lib/use-settings";
+import { GraphHistory } from "@/lib/history";
+import { parsePortable, remapPortable, toPortable } from "@/lib/portable";
 import { AssistantPanel } from "./AssistantPanel";
 import { FlowNode } from "./FlowNode";
 import { DND_MIME, Palette } from "./Palette";
@@ -47,8 +49,10 @@ import { PlayBar } from "./PlayBar";
 import { RunsPanel } from "./RunsPanel";
 import { SettingsModal } from "./SettingsModal";
 import { StatusScreen } from "./StatusScreen";
+import { MiniConsole, type ConsoleLine } from "./MiniConsole";
 import { toast } from "./Toast";
 import { readJson } from "@/lib/http";
+import { useTheme } from "./ThemeProvider";
 
 type FN = Node<FlowNodeData, "flow">;
 
@@ -57,9 +61,13 @@ const nodeTypes = { flow: FlowNode };
 export function Canvas({
   graphId,
   startAssistant = false,
+  shareToken,
+  readOnly = false,
 }: {
   graphId: string;
   startAssistant?: boolean;
+  shareToken?: string;
+  readOnly?: boolean;
 }) {
   const router = useRouter();
   const [nodes, setNodes, onNodesChange] = useNodesState<FN>([]);
@@ -77,6 +85,11 @@ export function Canvas({
   const [missing, setMissing] = useState(false);
   const [ready, setReady] = useState(false);
   const settingsApi = useSettings();
+  const theme = useTheme();
+  const historyRef = useRef(new GraphHistory());
+  const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [showConsole, setShowConsole] = useState(true);
   const { catalog, reload: reloadCatalog } = useModelCatalog(
     settingsApi.settings,
     settingsApi.env,
@@ -84,6 +97,10 @@ export function Canvas({
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const outputsRef = useRef<Record<string, NodeOutput[]>>({});
   const inflightRef = useRef(new Set<AbortController>());
+  const nodesRef = useRef(nodes);
+  const edgesRef = useRef(edges);
+  nodesRef.current = nodes;
+  edgesRef.current = edges;
   const fullRunRef = useRef<AbortController | null>(null);
   const stoppingRef = useRef(false);
   const rf = useReactFlow();
@@ -92,7 +109,11 @@ export function Canvas({
     let alive = true;
     (async () => {
       try {
-        const res = await fetch(`/api/graphs/${graphId}`);
+        const res = await fetch(
+        shareToken
+          ? `/api/graphs/${graphId}?share=${encodeURIComponent(shareToken)}`
+          : `/api/graphs/${graphId}`,
+      );
         if (res.status === 404) {
           if (alive) setMissing(true);
           return;
@@ -235,7 +256,48 @@ export function Canvas({
     };
   }, [graphId]);
 
-  const touch = useCallback(() => setDirty(true), []);
+  const applyDoc = useCallback(
+    (next: GraphDoc, markDirty = true) => {
+      setNodes(
+        next.nodes.map(
+          (n) =>
+            ({
+              id: n.id,
+              type: "flow",
+              position: n.position,
+              data: n.data,
+            }) as FN,
+        ),
+      );
+      setEdges(next.edges.map((e) => ({ ...e, type: "smoothstep" })));
+      if (markDirty) setDirty(true);
+    },
+    [setNodes, setEdges],
+  );
+
+  const snapshotNow = useCallback(() => {
+    historyRef.current.remember({
+      nodes: nodesRef.current.map((n) => ({
+        id: n.id,
+        type: "flow",
+        position: n.position,
+        data: n.data,
+      })),
+      edges: edgesRef.current.map((e) => ({
+        id: e.id,
+        source: e.source,
+        sourceHandle: e.sourceHandle ?? null,
+        target: e.target,
+        targetHandle: e.targetHandle ?? null,
+      })),
+    });
+  }, []);
+
+  const touch = useCallback(() => {
+    if (readOnly) return;
+    snapshotNow();
+    setDirty(true);
+  }, [readOnly, snapshotNow]);
 
   useEffect(() => {
     const onUpdate = (e: Event) => {
@@ -259,12 +321,35 @@ export function Canvas({
       touch();
     };
     const onRemove = (e: Event) => {
+      if (readOnly) return;
       const { nodeId } = (e as CustomEvent).detail as { nodeId: string };
+      snapshotNow();
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
       setEdges((es) =>
         es.filter((ed) => ed.source !== nodeId && ed.target !== nodeId),
       );
-      touch();
+      setDirty(true);
+      toast("Node deleted.", "info", {
+        label: "Undo",
+        onClick: () => {
+          const prev = historyRef.current.undo({
+            nodes: nodesRef.current.map((n) => ({
+              id: n.id,
+              type: "flow",
+              position: n.position,
+              data: n.data,
+            })),
+            edges: edgesRef.current.map((ed) => ({
+              id: ed.id,
+              source: ed.source,
+              sourceHandle: ed.sourceHandle ?? null,
+              target: ed.target,
+              targetHandle: ed.targetHandle ?? null,
+            })),
+          });
+          if (prev) applyDoc(prev);
+        },
+      });
     };
     const onDuplicate = (e: Event) => {
       const { nodeId } = (e as CustomEvent).detail as { nodeId: string };
@@ -399,10 +484,6 @@ export function Canvas({
     }
   }, []);
 
-  const nodesRef = useRef(nodes);
-  nodesRef.current = nodes;
-  const edgesRef = useRef(edges);
-  edgesRef.current = edges;
   const [runsTick, setRunsTick] = useState(0);
 
   const resetInFlight = useCallback(
@@ -516,10 +597,33 @@ export function Canvas({
               continue;
             }
             if (ev.type === "run") {
-              if (ev.status === "done" || ev.status === "error")
+              if (ev.runId) setActiveRunId(ev.runId);
+              setConsoleLines((xs) => [
+                ...xs.slice(-80),
+                {
+                  seq: xs.length + 1,
+                  type: "run",
+                  level: ev.status === "error" ? "error" : "info",
+                  status: ev.status,
+                  ts: ev.ts,
+                },
+              ]);
+              if (ev.status === "done" || ev.status === "error" || ev.status === "cancelled")
                 setRunsTick((t) => t + 1);
               continue;
             }
+            setConsoleLines((xs) => [
+              ...xs.slice(-80),
+              {
+                seq: xs.length + 1,
+                type: "node",
+                level: ev.status === "error" ? "error" : "info",
+                nodeId: ev.nodeId,
+                status: ev.status,
+                message: ev.error,
+                ts: ev.ts,
+              },
+            ]);
             setNodes((ns) =>
               ns.map((n) =>
                 n.id === ev.nodeId
@@ -615,14 +719,113 @@ export function Canvas({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      const meta = e.metaKey || e.ctrlKey;
+      const target = e.target as HTMLElement | null;
+      const typing = !!target?.closest("input, textarea, [contenteditable=true]");
+      if (meta && e.key === "s") {
         e.preventDefault();
-        save(true);
+        if (!readOnly) save(true);
+      }
+      if (meta && e.key === "z" && !e.shiftKey && !typing) {
+        e.preventDefault();
+        const prev = historyRef.current.undo({
+          nodes: nodesRef.current.map((n) => ({
+            id: n.id,
+            type: "flow",
+            position: n.position,
+            data: n.data,
+          })),
+          edges: edgesRef.current.map((ed) => ({
+            id: ed.id,
+            source: ed.source,
+            sourceHandle: ed.sourceHandle ?? null,
+            target: ed.target,
+            targetHandle: ed.targetHandle ?? null,
+          })),
+        });
+        if (prev) applyDoc(prev);
+      }
+      if (meta && (e.key === "y" || (e.key === "z" && e.shiftKey)) && !typing) {
+        e.preventDefault();
+        const next = historyRef.current.redo({
+          nodes: nodesRef.current.map((n) => ({
+            id: n.id,
+            type: "flow",
+            position: n.position,
+            data: n.data,
+          })),
+          edges: edgesRef.current.map((ed) => ({
+            id: ed.id,
+            source: ed.source,
+            sourceHandle: ed.sourceHandle ?? null,
+            target: ed.target,
+            targetHandle: ed.targetHandle ?? null,
+          })),
+        });
+        if (next) applyDoc(next);
+      }
+      if (meta && e.key === "c" && !typing) {
+        const selected = nodesRef.current.filter((n) => n.selected);
+        if (!selected.length) return;
+        const pack = toPortable(
+          {
+            nodes: nodesRef.current.map((n) => ({
+              id: n.id,
+              type: "flow",
+              position: n.position,
+              data: n.data,
+            })),
+            edges: edgesRef.current.map((ed) => ({
+              id: ed.id,
+              source: ed.source,
+              sourceHandle: ed.sourceHandle ?? null,
+              target: ed.target,
+              targetHandle: ed.targetHandle ?? null,
+            })),
+          },
+          { nodeIds: selected.map((n) => n.id) },
+        );
+        void navigator.clipboard.writeText(JSON.stringify(pack, null, 2));
+        toast("Copied nodes.", "ok");
+      }
+      if (meta && e.key === "v" && !typing && !readOnly) {
+        void (async () => {
+          const text = await navigator.clipboard.readText();
+          const pack = parsePortable(text);
+          if (!pack) return;
+          snapshotNow();
+          const incoming = remapPortable(pack, {
+            x: 80 + Math.random() * 40,
+            y: 80 + Math.random() * 40,
+          });
+          applyDoc({
+            nodes: [
+              ...nodesRef.current.map((n) => ({
+                id: n.id,
+                type: "flow" as const,
+                position: n.position,
+                data: n.data,
+              })),
+              ...incoming.nodes,
+            ],
+            edges: [
+              ...edgesRef.current.map((ed) => ({
+                id: ed.id,
+                source: ed.source,
+                sourceHandle: ed.sourceHandle ?? null,
+                target: ed.target,
+                targetHandle: ed.targetHandle ?? null,
+              })),
+              ...incoming.edges,
+            ],
+          });
+          toast("Pasted nodes.", "ok");
+        })();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [save]);
+  }, [save, applyDoc, snapshotNow, readOnly]);
 
   const statusOf = useMemo(() => {
     const m: Record<string, string> = {};
@@ -680,6 +883,26 @@ export function Canvas({
           onSettings={() => settingsApi.setShowSettings(true)}
           assistantOpen={showAssistant}
           onAssistant={() => setShowAssistant((v) => !v)}
+          onShare={
+            readOnly
+              ? undefined
+              : async () => {
+                  try {
+                    const res = await fetch(`/api/graphs/${graphId}/share`, {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ permission: "view" }),
+                    });
+                    const j = await readJson<{ url?: string; error?: string }>(res);
+                    if (!res.ok || !j.url) throw new Error(j.error || "Share failed");
+                    const url = `${window.location.origin}${j.url}`;
+                    await navigator.clipboard.writeText(url);
+                    toast("Share link copied.", "ok");
+                  } catch (e) {
+                    toast(e instanceof Error ? e.message : "Share failed", "error");
+                  }
+                }
+          }
         />
         <div className="relative flex-1" onDrop={onDrop} onDragOver={onDragOver}>
           <ReactFlow<FN>
@@ -687,11 +910,13 @@ export function Canvas({
             edges={styledEdges}
             nodeTypes={nodeTypes}
             onNodesChange={(c) => {
+              if (readOnly) return;
               onNodesChange(c);
               if (c.some((ch) => ch.type === "position" || ch.type === "remove"))
                 touch();
             }}
             onEdgesChange={(c) => {
+              if (readOnly) return;
               onEdgesChange(c);
               if (c.some((ch) => ch.type === "remove")) touch();
             }}
@@ -703,7 +928,7 @@ export function Canvas({
             fitViewOptions={{ padding: 0.22, maxZoom: 1 }}
             minZoom={0.05}
             maxZoom={4}
-            colorMode="dark"
+            colorMode={theme.resolved}
             zoomOnDoubleClick={false}
             deleteKeyCode={["Backspace", "Delete"]}
           >
@@ -783,10 +1008,16 @@ export function Canvas({
               </Panel>
             )}
           </ReactFlow>
-          <Palette onAdd={addNode} defs={NODE_TYPES} />
-          {showAssistant && (
+          {!readOnly && <Palette onAdd={addNode} defs={NODE_TYPES} />}
+          {showConsole && (
+            <div className="absolute bottom-3 left-3 z-10 w-[min(420px,calc(100vw-1.5rem))]">
+              <MiniConsole lines={consoleLines} runId={activeRunId} />
+            </div>
+          )}
+          {showAssistant && !readOnly && (
             <AssistantPanel
               graphId={graphId}
+              selectedNodeIds={nodes.filter((n) => n.selected).map((n) => n.id)}
               graph={{
                 nodes: nodes.map((n) => ({
                   id: n.id,
