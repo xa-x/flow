@@ -224,6 +224,13 @@ ${runContext}
 Rules:
 - Reply in the user's language.
 - Use ops to create or edit the graph. Prefer add_node + connect over describing steps the user must do by hand.
+- ALWAYS emit a connect op between every pair of nodes that should pass data. A pipeline with no edges will not run.
+- Use the exact handle ids from the catalog. If unsure, omit sourceHandle/targetHandle — the canvas will pick a type-compatible pair (image→image, video→video, text→prompt).
+- Never connect an image or video port to a text/prompt handle.
+- Typical pipelines:
+  Image (image.in) → AI Image (image.gen, image→image) → Media Out (out.media, out→in)
+  Image (image.in) → AI Video (video.gen, out→image) → Media Out (out.media, out→video)
+  Text → AI Text (llm, out→in) → Output (out.text)
 - Edit the existing workbook in place. Do not rebuild from scratch unless the user asks.
 - When the user @mentions a node, update that node (or nodes connected to it) instead of rebuilding the whole graph.
 - Prefer update_node over remove_node + add_node.

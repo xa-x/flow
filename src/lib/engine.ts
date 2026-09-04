@@ -8,6 +8,7 @@ import { newId } from "./ids";
 import { downstreamIds } from "./graph";
 import { appendEvent } from "./runs/events";
 import { recordUsage } from "./runs/enqueue";
+import { writeNodeOutputToGraph } from "./runs/persist-graph";
 
 const MAX_CONCURRENCY = 4;
 
@@ -202,6 +203,17 @@ export async function* executeGraph(
             finishedAt: new Date(),
           },
         });
+      await writeNodeOutputToGraph(opts.graphId, nodeId, {
+        outputs: result?.outputs,
+        runStatus:
+          status === "skipped" || status === "error"
+            ? "error"
+            : status === "running"
+              ? "running"
+              : "done",
+        runError: error ?? null,
+        runUsage: result?.usage,
+      });
     } catch {
       /* best effort */
     }
@@ -263,6 +275,8 @@ export async function* executeGraph(
           settings: opts.settings,
           emit,
           nodeId,
+          orgId,
+          runId,
         });
         outputs.set(nodeId, result.outputs);
         totals.costUsd += result.usage?.costUsd ?? 0;

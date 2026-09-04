@@ -29,6 +29,7 @@ export function PlayBar({
   assistantOpen,
   onAssistant,
   onShare,
+  costLabel,
 }: {
   title: string;
   onTitle: (t: string) => void;
@@ -46,6 +47,7 @@ export function PlayBar({
   assistantOpen?: boolean;
   onAssistant?: () => void;
   onShare?: () => void;
+  costLabel?: string | null;
 }) {
   const [menu, setMenu] = useState(false);
 
@@ -180,6 +182,11 @@ export function PlayBar({
       />
 
       <div className="ml-auto flex items-center gap-3">
+        {costLabel && costLabel !== "—" && (
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted" title="Last run cost">
+            {costLabel}
+          </span>
+        )}
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
           {running
             ? "Running"

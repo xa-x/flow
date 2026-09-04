@@ -1,4 +1,4 @@
-import { nodeDef, portAccepts } from "./nodes";
+import { matchPorts, nodeDef } from "./nodes";
 import type { GraphDoc } from "./types";
 
 export const PORTABLE_KIND = "flowbook/workbook";
@@ -102,19 +102,19 @@ export function remapPortable(
     const src = nodes.find((n) => n.id === source);
     const tgt = nodes.find((n) => n.id === target);
     if (!src || !tgt) continue;
-    const sDef = nodeDef(src.data.kind);
-    const tDef = nodeDef(tgt.data.kind);
-    const sourceHandle = e.sourceHandle ?? sDef?.outputs[0]?.id ?? "out";
-    const targetHandle = e.targetHandle ?? tDef?.inputs[0]?.id ?? "in";
-    const sPort = sDef?.outputs.find((p) => p.id === sourceHandle);
-    const tPort = tDef?.inputs.find((p) => p.id === targetHandle);
-    if (sPort && tPort && !portAccepts(tPort.type, sPort.type)) continue;
+    const ports = matchPorts(
+      src.data.kind,
+      tgt.data.kind,
+      e.sourceHandle,
+      e.targetHandle,
+    );
+    if (!ports) continue;
     edges.push({
       id: `e${stamp}${edges.length.toString(36)}`,
       source,
       target,
-      sourceHandle,
-      targetHandle,
+      sourceHandle: ports.sourceHandle,
+      targetHandle: ports.targetHandle,
     });
   }
 

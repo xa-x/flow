@@ -183,3 +183,42 @@ export function portAccepts(sink: PortType, source: PortType): boolean {
   if (sink === source) return true;
   return false;
 }
+
+/**
+ * Pick compatible source/target handles. Wrong or missing handle ids
+ * (the assistant often emits "in"/"out") are remapped to a typed pair.
+ */
+export function matchPorts(
+  srcKind: string,
+  tgtKind: string,
+  sourceHandle?: string | null,
+  targetHandle?: string | null,
+): { sourceHandle: string; targetHandle: string } | null {
+  const sDef = nodeDef(srcKind);
+  const tDef = nodeDef(tgtKind);
+  if (!sDef?.outputs.length || !tDef?.inputs.length) return null;
+  const srcPorts = sDef.outputs;
+  const tgtPorts = tDef.inputs;
+  const namedSrc = sourceHandle
+    ? srcPorts.find((p) => p.id === sourceHandle)
+    : undefined;
+  const namedTgt = targetHandle
+    ? tgtPorts.find((p) => p.id === targetHandle)
+    : undefined;
+  if (namedSrc && namedTgt && portAccepts(namedTgt.type, namedSrc.type)) {
+    return { sourceHandle: namedSrc.id, targetHandle: namedTgt.id };
+  }
+  if (namedSrc) {
+    const t = tgtPorts.find((p) => portAccepts(p.type, namedSrc.type));
+    if (t) return { sourceHandle: namedSrc.id, targetHandle: t.id };
+  }
+  if (namedTgt) {
+    const s = srcPorts.find((p) => portAccepts(namedTgt.type, p.type));
+    if (s) return { sourceHandle: s.id, targetHandle: namedTgt.id };
+  }
+  for (const s of srcPorts) {
+    const t = tgtPorts.find((p) => portAccepts(p.type, s.type));
+    if (t) return { sourceHandle: s.id, targetHandle: t.id };
+  }
+  return null;
+}

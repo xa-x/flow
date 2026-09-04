@@ -14,6 +14,45 @@ function playableSrc(src: string) {
   return src.includes("?") ? `${src}&play=1` : `${src}?play=1`;
 }
 
+function downloadHref(src: string) {
+  if (!src || src.startsWith("data:") || src.startsWith("blob:")) return src;
+  return src.includes("?") ? `${src}&download=1` : `${src}?download=1`;
+}
+
+function filenameFor(kind: string, src: string) {
+  const fromUrl = src.split("?")[0].split("/").pop();
+  if (fromUrl && fromUrl.includes(".")) return fromUrl;
+  const ext =
+    kind === "video" ? "mp4" : kind === "audio" ? "mp3" : kind === "image" ? "png" : "bin";
+  return `flowbook-${kind}.${ext}`;
+}
+
+export function downloadOutputs(
+  outputs: { type: string; text?: string; url?: string }[],
+) {
+  let n = 0;
+  for (const o of outputs) {
+    if (o.type === "text" && o.text?.trim()) {
+      const blob = new Blob([o.text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      triggerDownload(url, `output-${++n}.txt`);
+      setTimeout(() => URL.revokeObjectURL(url), 4_000);
+    } else if (o.url) {
+      triggerDownload(downloadHref(o.url), filenameFor(o.type, o.url));
+    }
+  }
+}
+
+function triggerDownload(href: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 export function OutputRenderer({ output }: { output: NodeOutput }) {
   if (output.type === "text") {
     const blocks = parseTextOutput(output.text ?? "");
@@ -160,19 +199,49 @@ function JsonViewer({ text }: { text: string }) {
 }
 
 function MediaEmbed({ kind, src }: { kind: string; src: string }) {
+  const file = filenameFor(kind, src);
+  const link = (
+    <a
+      href={downloadHref(src)}
+      download={file}
+      title="Download"
+      className="absolute right-1.5 top-1.5 z-10 rounded bg-black/55 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-white/90 opacity-0 transition-opacity hover:bg-black/75 group-hover:opacity-100"
+    >
+      Save
+    </a>
+  );
   if (kind === "image")
-    // eslint-disable-next-line @next/next/no-img-element
-    return <img src={src} alt="" className="fb-media nowheel max-h-56 w-full object-cover" />;
+    return (
+      <div className="group relative">
+        {link}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt="" className="fb-media nowheel max-h-56 w-full object-cover" />
+      </div>
+    );
   if (kind === "audio")
     return (
-      <audio
-        controls
-        preload="metadata"
-        src={playableSrc(src)}
-        className="nodrag mt-1 w-full"
-      />
+      <div className="group relative">
+        {link}
+        <audio
+          controls
+          preload="metadata"
+          src={playableSrc(src)}
+          className="nodrag mt-1 w-full"
+        />
+      </div>
     );
   if (kind === "video")
-    return <video controls src={src} className="fb-media nowheel max-h-56 w-full" />;
+    return (
+      <div className="group relative">
+        {link}
+        <video
+          controls
+          playsInline
+          preload="metadata"
+          src={src}
+          className="fb-media nowheel max-h-56 w-full bg-black"
+        />
+      </div>
+    );
   return null;
 }

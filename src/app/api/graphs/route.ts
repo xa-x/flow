@@ -7,6 +7,7 @@ import { canEdit } from "@/lib/tenant";
 import { newId } from "@/lib/ids";
 import { snapshotWorkbook } from "@/lib/versions";
 import { toPortable } from "@/lib/portable";
+import { mergeGraphRuntime } from "@/lib/graph";
 import { ensureJobLoop } from "@/lib/runs/worker";
 import type { GraphDoc } from "@/lib/types";
 
@@ -139,6 +140,9 @@ export async function PATCH(req: NextRequest) {
       version: (cur.version ?? 1) + 1,
     };
     for (const k of ACCEPTED_KEYS) if (k in body) patch[k] = body[k];
+    if (body.graph) {
+      patch.graph = mergeGraphRuntime(body.graph as GraphDoc, cur.graph as GraphDoc);
+    }
     if (body.publish) patch.publishedGraph = body.graph ?? cur.graph;
     const [row] = await db
       .update(graphs)

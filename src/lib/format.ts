@@ -1,7 +1,14 @@
 export function fmtCost(micro: number) {
   if (!micro) return "—";
-  const usd = micro / 1e6;
-  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  return fmtUsd(micro / 1e6);
+}
+
+/** Format a dollar amount from provider usage (already in USD). */
+export function fmtUsd(dollars?: number | null) {
+  if (dollars == null || !Number.isFinite(dollars) || dollars <= 0) return "—";
+  if (dollars < 0.01) return `$${dollars.toFixed(4)}`;
+  if (dollars < 10) return `$${dollars.toFixed(3)}`.replace(/0+$/, "").replace(/\.$/, "");
+  return `$${dollars.toFixed(2)}`;
 }
 
 export function fmtDur(ms?: number | null) {

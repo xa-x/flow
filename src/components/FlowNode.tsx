@@ -48,9 +48,10 @@ import {
   voiceChoices,
 } from "@/lib/media-params";
 import type { FlowNodeData } from "@/lib/types";
-import { OutputRenderer } from "./OutputRenderer";
+import { OutputRenderer, downloadOutputs } from "./OutputRenderer";
 import { toast } from "./Toast";
 import { readJson } from "@/lib/http";
+import { fmtUsd } from "@/lib/format";
 
 const PORT_COLORS: Record<PortType, string> = {
   text: "#3b82f6",
@@ -241,6 +242,11 @@ export function FlowNode({ id, data, selected }: NodeProps) {
         )}
 
         <StatusMark status={status} />
+        {d.runUsage?.costUsd ? (
+          <span className="font-mono text-[9px] text-faint" title="Node cost">
+            {fmtUsd(d.runUsage.costUsd)}
+          </span>
+        ) : null}
       </header>
 
       {/* body */}
@@ -589,13 +595,24 @@ export function FlowNode({ id, data, selected }: NodeProps) {
                     ? "streaming…"
                     : describeOutputs(outputs)}
                 </span>
-                <button
-                  onClick={() => copy(outputs.map((o) => (o.type === "text" ? o.text : o.url ?? "")).join("\n\n"))}
-                  title="Copy raw output"
-                  className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted transition-colors hover:text-live"
-                >
-                  {copied ? "Copied ✓" : "Copy"}
-                </button>
+                <div className="flex items-center gap-2">
+                  {outputs.some((o) => o.type !== "text" ? !!o.url : !!o.text?.trim()) && (
+                    <button
+                      onClick={() => downloadOutputs(outputs)}
+                      title="Download output"
+                      className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted transition-colors hover:text-live"
+                    >
+                      Download
+                    </button>
+                  )}
+                  <button
+                    onClick={() => copy(outputs.map((o) => (o.type === "text" ? o.text : o.url ?? "")).join("\n\n"))}
+                    title="Copy raw output"
+                    className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted transition-colors hover:text-live"
+                  >
+                    {copied ? "Copied ✓" : "Copy"}
+                  </button>
+                </div>
               </div>
               {status === "running" && streaming ? (
                 <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-sunken px-2.5 py-2 font-mono text-[10.5px] leading-relaxed text-ink/80">
@@ -795,8 +812,10 @@ function MediaPreview({ url, kind }: { url: string; kind: string }) {
     return (
       <video
         controls
+        playsInline
+        preload="metadata"
         src={url}
-        className="nowheel mt-2 max-h-56 w-full rounded-md border border-line"
+        className="nowheel mt-2 max-h-56 w-full rounded-md border border-line bg-black"
       />
     );
   return null;

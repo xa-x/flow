@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { NODE_TYPES, nodeDef } from "./nodes";
+import { NODE_TYPES, matchPorts, nodeDef } from "./nodes";
+import { placeAddedNodes } from "./layout";
 import type { GraphDoc } from "./types";
 
 export const graphOpSchema = z.discriminatedUnion("op", [
@@ -113,6 +114,7 @@ export function applyGraphOps(doc: GraphDoc, ops: GraphOp[]): GraphDoc {
   };
 
   let added = 0;
+  const addedIds: string[] = [];
   const maxX = nodes.reduce((m, n) => Math.max(m, n.position.x), 40);
 
   for (const op of ops) {
@@ -143,6 +145,7 @@ export function applyGraphOps(doc: GraphDoc, ops: GraphOp[]): GraphDoc {
           resolution: op.resolution,
         },
       });
+      addedIds.push(id);
       added += 1;
     } else if (op.op === "update_node") {
       const id = resolve(op.id);
@@ -169,24 +172,27 @@ export function applyGraphOps(doc: GraphDoc, ops: GraphOp[]): GraphDoc {
       const src = nodes.find((n) => n.id === source);
       const tgt = nodes.find((n) => n.id === target);
       if (!src || !tgt || src.id === tgt.id) continue;
-      const sDef = nodeDef(src.data.kind);
-      const tDef = nodeDef(tgt.data.kind);
-      const sourceHandle = op.sourceHandle ?? sDef?.outputs[0]?.id ?? "out";
-      const targetHandle = op.targetHandle ?? tDef?.inputs[0]?.id ?? "in";
+      const ports = matchPorts(
+        src.data.kind,
+        tgt.data.kind,
+        op.sourceHandle,
+        op.targetHandle,
+      );
+      if (!ports) continue;
       const exists = edges.some(
         (e) =>
           e.source === source &&
           e.target === target &&
-          (e.sourceHandle ?? "out") === sourceHandle &&
-          (e.targetHandle ?? "in") === targetHandle,
+          (e.sourceHandle ?? ports.sourceHandle) === ports.sourceHandle &&
+          (e.targetHandle ?? ports.targetHandle) === ports.targetHandle,
       );
       if (exists) continue;
       edges.push({
         id: `e${nid()}`,
         source,
         target,
-        sourceHandle,
-        targetHandle,
+        sourceHandle: ports.sourceHandle,
+        targetHandle: ports.targetHandle,
       });
     } else if (op.op === "disconnect") {
       const source = resolve(op.source);
@@ -200,7 +206,85 @@ export function applyGraphOps(doc: GraphDoc, ops: GraphOp[]): GraphDoc {
     }
   }
 
-  return { nodes, edges, viewport: doc.viewport };
+  let next: GraphDoc = { nodes, edges, viewport: doc.viewport };
+  if (addedIds.length) {
+    next = placeAddedNodes(next, addedIds);
+    next = {
+      ...next,
+      edges: autoWireNodes(next.nodes, next.edges, addedIds),
+    };
+  }
+  return next;
+}
+
+function tryConnect(
+  nodes: GraphDoc["nodes"],
+  edges: GraphDoc["edges"],
+  source: string,
+  target: string,
+) {
+  if (source === target) return edges;
+  const src = nodes.find((n) => n.id === source);
+  const tgt = nodes.find((n) => n.id === target);
+  if (!src || !tgt) return edges;
+  const ports = matchPorts(src.data.kind, tgt.data.kind);
+  if (!ports) return edges;
+  const exists = edges.some(
+    (e) =>
+      e.source === source &&
+      e.target === target &&
+      (e.sourceHandle ?? ports.sourceHandle) === ports.sourceHandle &&
+      (e.targetHandle ?? ports.targetHandle) === ports.targetHandle,
+  );
+  if (exists) return edges;
+  return [
+    ...edges,
+    {
+      id: `e${nid()}`,
+      source,
+      target,
+      sourceHandle: ports.sourceHandle,
+      targetHandle: ports.targetHandle,
+    },
+  ];
+}
+
+/** Connect newly added nodes to each other and to compatible existing ports. */
+export function autoWireNodes(
+  nodes: GraphDoc["nodes"],
+  edges: GraphDoc["edges"],
+  newIds: string[],
+): GraphDoc["edges"] {
+  let next = edges.map((e) => ({ ...e }));
+  for (let i = 0; i < newIds.length - 1; i++) {
+    next = tryConnect(nodes, next, newIds[i], newIds[i + 1]);
+  }
+  for (const id of newIds) {
+    const hasIn = next.some((e) => e.target === id);
+    if (hasIn) continue;
+    const tgt = nodes.find((n) => n.id === id);
+    if (!tgt || !nodeDef(tgt.data.kind)?.inputs.length) continue;
+    const candidate = [...nodes]
+      .reverse()
+      .find((n) => n.id !== id && matchPorts(n.data.kind, tgt.data.kind));
+    if (candidate) next = tryConnect(nodes, next, candidate.id, id);
+  }
+  const newSet = new Set(newIds);
+  for (const id of newIds) {
+    const hasOut = next.some((e) => e.source === id);
+    if (hasOut) continue;
+    const src = nodes.find((n) => n.id === id);
+    if (!src || !nodeDef(src.data.kind)?.outputs.length) continue;
+    const sink = nodes.find(
+      (n) =>
+        !newSet.has(n.id) &&
+        n.data.kind.startsWith("out.") &&
+        matchPorts(src.data.kind, n.data.kind) &&
+        !next.some((e) => e.target === n.id),
+    );
+    if (sink) next = tryConnect(nodes, next, id, sink.id);
+  }
+  return next;
 }
 
 export function parseAssistantOutput(raw: unknown): AssistantOutput | null {

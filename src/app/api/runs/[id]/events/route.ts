@@ -56,7 +56,18 @@ export async function GET(
             fresh &&
             ["done", "error", "cancelled", "timed_out"].includes(fresh.status)
           ) {
-            push({ type: "end", status: fresh.status, seq: cursor });
+            push({
+              type: "end",
+              status: fresh.status,
+              seq: cursor,
+              runId: id,
+              usage: {
+                totalCostUsd: (fresh.totalCostUsd ?? 0) / 1e6,
+                totalTokens: fresh.totalTokens ?? 0,
+                durationMs: fresh.durationMs ?? undefined,
+              },
+              ts: Date.now(),
+            });
             break;
           }
           await new Promise((r) => setTimeout(r, 400));

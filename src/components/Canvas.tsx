@@ -39,6 +39,9 @@ import type {
 import { ModelCatalogProvider, useModelCatalog } from "@/lib/model-catalog";
 import { starterGraph } from "@/lib/starter";
 import { downstreamIds } from "@/lib/graph";
+import { layoutGraph } from "@/lib/layout";
+import { watchRunEvents } from "@/lib/runs/watch";
+import { fmtUsd } from "@/lib/format";
 import { useSettings } from "@/lib/use-settings";
 import { GraphHistory } from "@/lib/history";
 import { parsePortable, remapPortable, toPortable } from "@/lib/portable";
@@ -89,7 +92,26 @@ export function Canvas({
   const historyRef = useRef(new GraphHistory());
   const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [showConsole, setShowConsole] = useState(true);
+  const [runCostUsd, setRunCostUsd] = useState<number | null>(null);
+  const [consoleCollapsed, setConsoleCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("flowbook.console.collapsed") === "1")
+        setConsoleCollapsed(true);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        "flowbook.console.collapsed",
+        consoleCollapsed ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [consoleCollapsed]);
   const { catalog, reload: reloadCatalog } = useModelCatalog(
     settingsApi.settings,
     settingsApi.env,
@@ -101,9 +123,12 @@ export function Canvas({
   const edgesRef = useRef(edges);
   nodesRef.current = nodes;
   edgesRef.current = edges;
-  const fullRunRef = useRef<AbortController | null>(null);
   const stoppingRef = useRef(false);
+  const watchAbortRef = useRef<AbortController | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+  const attachRunRef = useRef<(id: string) => Promise<void>>(async () => {});
   const rf = useReactFlow();
+  activeRunIdRef.current = activeRunId;
 
   useEffect(() => {
     let alive = true;
@@ -164,6 +189,72 @@ export function Canvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphId]);
 
+  useEffect(() => {
+    return () => {
+      watchAbortRef.current?.abort();
+    };
+  }, [graphId]);
+
+  useEffect(() => {
+    if (!ready || readOnly) return;
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch(`/api/runs?graphId=${graphId}&limit=1`);
+        const j = await readJson<{
+          runs?: { id: string; status: string; totalCostUsd: number }[];
+        }>(res);
+        const latest = j.runs?.[0];
+        if (!alive || !latest) return;
+        if (latest.totalCostUsd)
+          setRunCostUsd(latest.totalCostUsd / 1e6);
+        if (latest.status === "queued" || latest.status === "running") {
+          await attachRunRef.current(latest.id);
+          return;
+        }
+        const detail = await fetch(`/api/runs?runId=${latest.id}`);
+        const d = await readJson<{
+          nodes?: {
+            nodeId: string;
+            status: string;
+            output: NodeOutput[] | null;
+            costUsd: number;
+            error: string | null;
+          }[];
+        }>(detail);
+        if (!alive || !d.nodes?.length) return;
+        setNodes((ns) =>
+          ns.map((n) => {
+            const row = d.nodes!.find((r) => r.nodeId === n.id);
+            if (!row) return n;
+            if (n.data.outputs?.length) return n;
+            const outputs = (row.output ?? undefined) as NodeOutput[] | undefined;
+            if (outputs?.length) outputsRef.current[n.id] = outputs;
+            return {
+              ...n,
+              data: {
+                ...n.data,
+                runStatus: row.status as FlowNodeData["runStatus"],
+                runError: row.error ?? undefined,
+                outputs: outputs ?? n.data.outputs,
+                runUsage: row.costUsd
+                  ? { costUsd: row.costUsd / 1e6 }
+                  : n.data.runUsage,
+              },
+            };
+          }),
+        );
+      } catch {
+        /* reconnect is best-effort */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // attachRun is stable enough for mount-time reconnect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, graphId, readOnly]);
+
   const doc = useMemo(
     () => ({
       nodes: nodes.map((n) => ({
@@ -183,6 +274,9 @@ export function Canvas({
           resolution: n.data.resolution,
           artifactId: n.data.artifactId,
           outputs: n.data.outputs,
+          runStatus: n.data.runStatus,
+          runError: n.data.runError,
+          runUsage: n.data.runUsage,
         } as FlowNodeData,
       })),
       edges,
@@ -292,6 +386,29 @@ export function Canvas({
       })),
     });
   }, []);
+
+  const arrange = useCallback(() => {
+    snapshotNow();
+    const next = layoutGraph({
+      nodes: nodesRef.current.map((n) => ({
+        id: n.id,
+        type: "flow",
+        position: n.position,
+        data: n.data,
+      })),
+      edges: edgesRef.current.map((e) => ({
+        id: e.id,
+        source: e.source,
+        sourceHandle: e.sourceHandle ?? null,
+        target: e.target,
+        targetHandle: e.targetHandle ?? null,
+      })),
+    });
+    applyDoc(next);
+    requestAnimationFrame(() =>
+      rf.fitView({ padding: 0.22, duration: 400, maxZoom: 1 }),
+    );
+  }, [applyDoc, snapshotNow, rf]);
 
   const touch = useCallback(() => {
     if (readOnly) return;
@@ -509,15 +626,135 @@ export function Canvas({
     [setNodes],
   );
 
+  const applyRunEvent = useCallback(
+    (ev: RunEvent) => {
+      if (ev.type === "delta") {
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === ev.nodeId
+              ? {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    streamingText: (n.data.streamingText ?? "") + ev.text,
+                  },
+                }
+              : n,
+          ),
+        );
+        return;
+      }
+      if (ev.type === "run") {
+        if (ev.runId) {
+          setActiveRunId(ev.runId);
+          activeRunIdRef.current = ev.runId;
+        }
+        if (ev.status !== "started" && ev.usage?.totalCostUsd)
+          setRunCostUsd(ev.usage.totalCostUsd);
+        setConsoleLines((xs) => [
+          ...xs.slice(-80),
+          {
+            seq: xs.length + 1,
+            type: "run",
+            level: ev.status === "error" ? "error" : "info",
+            status: ev.status,
+            ts: ev.ts,
+          },
+        ]);
+        if (
+          ev.status === "done" ||
+          ev.status === "error" ||
+          ev.status === "cancelled" ||
+          ev.status === "timed_out"
+        ) {
+          setRunsTick((t) => t + 1);
+          setDirty(true);
+        }
+        return;
+      }
+      setConsoleLines((xs) => [
+        ...xs.slice(-80),
+        {
+          seq: xs.length + 1,
+          type: "node",
+          level: ev.status === "error" ? "error" : "info",
+          nodeId: ev.nodeId,
+          status: ev.status,
+          message: ev.error,
+          ts: ev.ts,
+        },
+      ]);
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === ev.nodeId
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  runStatus: ev.status,
+                  runError: ev.error,
+                  outputs: ev.outputs ?? n.data.outputs,
+                  runUsage:
+                    ev.status === "running" || ev.status === "queued"
+                      ? undefined
+                      : (ev.usage ?? n.data.runUsage),
+                  streamingText:
+                    ev.status === "done" || ev.status === "error"
+                      ? undefined
+                      : n.data.streamingText,
+                },
+              }
+            : n,
+        ),
+      );
+      if (ev.status === "done" && ev.outputs)
+        outputsRef.current[ev.nodeId] = ev.outputs;
+      if (ev.status === "done" && ev.usage?.costUsd)
+        setRunCostUsd((c) => (c ?? 0) + (ev.usage?.costUsd ?? 0));
+    },
+    [setNodes],
+  );
+
+  const attachRun = useCallback(
+    async (runId: string) => {
+      watchAbortRef.current?.abort();
+      const ac = new AbortController();
+      watchAbortRef.current = ac;
+      inflightRef.current.add(ac);
+      setActiveRunId(runId);
+      activeRunIdRef.current = runId;
+      setRunning(true);
+      try {
+        await watchRunEvents(runId, { signal: ac.signal, onEvent: applyRunEvent });
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") {
+          if (stoppingRef.current) {
+            resetInFlight("idle");
+            toast("Run cancelled.");
+          }
+        } else {
+          const msg = e instanceof Error ? e.message : "Run failed";
+          resetInFlight("error", msg);
+          toast(msg, "error");
+        }
+      } finally {
+        inflightRef.current.delete(ac);
+        if (watchAbortRef.current === ac) watchAbortRef.current = null;
+        if (!inflightRef.current.size) {
+          stoppingRef.current = false;
+          setRunning(false);
+        }
+      }
+    },
+    [applyRunEvent, resetInFlight],
+  );
+  attachRunRef.current = attachRun;
+
   const run = useCallback(
     async (from?: string) => {
-      const ac = new AbortController();
-      if (!from) {
-        fullRunRef.current?.abort();
-        fullRunRef.current = ac;
-      }
-      inflightRef.current.add(ac);
-      setRunning(true);
+      stoppingRef.current = false;
+      setRunCostUsd(null);
+      setConsoleLines([]);
       const payload = {
         graph: {
           nodes: nodesRef.current.map((n) => ({
@@ -530,7 +767,6 @@ export function Canvas({
         graphId,
         from,
         cached: outputsRef.current,
-        settings: settingsApi.settings,
       };
       const targets = from
         ? downstreamIds(from, edgesRef.current)
@@ -542,134 +778,51 @@ export function Canvas({
                 ...n,
                 data: {
                   ...n.data,
-                  runStatus: "queued",
+                  runStatus: "queued" as const,
                   runError: undefined,
+                  runUsage: undefined,
                   streamingText: undefined,
                 },
               }
             : n,
         ),
       );
+      setRunning(true);
       try {
-        const res = await fetch("/api/run", {
+        const res = await fetch("/api/runs", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload),
-          signal: ac.signal,
         });
-        if (!res.ok) {
-          const j = await readJson<{ error?: string }>(res).catch(() => ({} as { error?: string }));
+        const j = await readJson<{ runId?: string; error?: string }>(res);
+        if (!res.ok || !j.runId) {
           throw new Error(
             typeof j.error === "string" ? j.error : `Run failed (${res.status})`,
           );
         }
-        const reader = res.body!.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            let ev: RunEvent;
-            try {
-              ev = JSON.parse(line) as RunEvent;
-            } catch {
-              continue;
-            }
-            if (ev.type === "delta") {
-              setNodes((ns) =>
-                ns.map((n) =>
-                  n.id === ev.nodeId
-                    ? {
-                        ...n,
-                        data: {
-                          ...n.data,
-                          streamingText: (n.data.streamingText ?? "") + ev.text,
-                        },
-                      }
-                    : n,
-                ),
-              );
-              continue;
-            }
-            if (ev.type === "run") {
-              if (ev.runId) setActiveRunId(ev.runId);
-              setConsoleLines((xs) => [
-                ...xs.slice(-80),
-                {
-                  seq: xs.length + 1,
-                  type: "run",
-                  level: ev.status === "error" ? "error" : "info",
-                  status: ev.status,
-                  ts: ev.ts,
-                },
-              ]);
-              if (ev.status === "done" || ev.status === "error" || ev.status === "cancelled")
-                setRunsTick((t) => t + 1);
-              continue;
-            }
-            setConsoleLines((xs) => [
-              ...xs.slice(-80),
-              {
-                seq: xs.length + 1,
-                type: "node",
-                level: ev.status === "error" ? "error" : "info",
-                nodeId: ev.nodeId,
-                status: ev.status,
-                message: ev.error,
-                ts: ev.ts,
-              },
-            ]);
-            setNodes((ns) =>
-              ns.map((n) =>
-                n.id === ev.nodeId
-                  ? {
-                      ...n,
-                      data: {
-                        ...n.data,
-                        runStatus: ev.status,
-                        runError: ev.error,
-                        outputs: ev.outputs ?? n.data.outputs,
-                        runUsage: ev.usage ?? n.data.runUsage,
-                        streamingText:
-                          ev.status === "done" || ev.status === "error"
-                            ? undefined
-                            : n.data.streamingText,
-                      },
-                    }
-                  : n,
-              ),
-            );
-            if (ev.status === "done" && ev.outputs)
-              outputsRef.current[ev.nodeId] = ev.outputs;
-          }
-        }
+        await attachRun(j.runId);
       } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") {
-          resetInFlight("idle", undefined, targets);
-          if (stoppingRef.current) toast("Run cancelled.");
-        } else {
-          const msg = e instanceof Error ? e.message : "Run failed";
-          resetInFlight("error", msg, targets);
-          toast(msg, "error");
-        }
-      } finally {
-        inflightRef.current.delete(ac);
-        if (fullRunRef.current === ac) fullRunRef.current = null;
-        if (!inflightRef.current.size) stoppingRef.current = false;
-        setRunning(inflightRef.current.size > 0);
+        const msg = e instanceof Error ? e.message : "Run failed";
+        resetInFlight("error", msg, targets);
+        toast(msg, "error");
+        setRunning(false);
       }
     },
-    [setNodes, settingsApi.settings, graphId, resetInFlight],
+    [setNodes, graphId, resetInFlight, attachRun],
   );
 
   const stop = useCallback(() => {
     stoppingRef.current = true;
+    const id = activeRunIdRef.current;
+    watchAbortRef.current?.abort();
     for (const ac of inflightRef.current) ac.abort();
+    if (id) {
+      void fetch(`/api/runs/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cancel: true }),
+      });
+    }
   }, []);
 
   const onNodeDoubleClick = useCallback(
@@ -876,6 +1029,7 @@ export function Canvas({
           onSave={() => save(true)}
           saved={saved}
           dirty={dirty}
+          costLabel={fmtUsd(runCostUsd)}
           books={books}
           activeId={graphId}
           onOpen={(id) => openBook(id)}
@@ -963,6 +1117,21 @@ export function Canvas({
                   onToggle={() => setShowRuns((v) => !v)}
                 />
                 <button
+                  onClick={arrange}
+                  title="Arrange nodes"
+                  className="flex h-7 items-center gap-1.5 rounded-lg border border-line bg-card/80 px-2 text-faint backdrop-blur transition-colors hover:text-ink"
+                >
+                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>
+                    <rect x="1" y="1.5" width="4" height="3" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+                    <rect x="7" y="4" width="4" height="3" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+                    <rect x="1" y="7.5" width="4" height="3" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+                    <path d="M5 3h2M5 9h2" stroke="currentColor" strokeWidth="1.2" />
+                  </svg>
+                  <span className="font-mono text-[9px] uppercase tracking-[0.14em]">
+                    Arrange
+                  </span>
+                </button>
+                <button
                   onClick={() => setShowMini((v) => !v)}
                   title={showMini ? "Hide minimap" : "Show minimap"}
                   className={`flex h-7 w-7 items-center justify-center rounded-lg border backdrop-blur transition-colors ${
@@ -1009,11 +1178,15 @@ export function Canvas({
             )}
           </ReactFlow>
           {!readOnly && <Palette onAdd={addNode} defs={NODE_TYPES} />}
-          {showConsole && (
-            <div className="absolute bottom-3 left-3 z-10 w-[min(420px,calc(100vw-1.5rem))]">
-              <MiniConsole lines={consoleLines} runId={activeRunId} />
+          <div className="absolute bottom-3 left-3 z-10 w-[min(420px,calc(100vw-1.5rem))]">
+              <MiniConsole
+                lines={consoleLines}
+                runId={activeRunId}
+                costUsd={runCostUsd}
+                collapsed={consoleCollapsed}
+                onToggle={() => setConsoleCollapsed((v) => !v)}
+              />
             </div>
-          )}
           {showAssistant && !readOnly && (
             <AssistantPanel
               graphId={graphId}

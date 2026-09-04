@@ -66,6 +66,36 @@ export interface RunCtx {
   settings?: RunSettings;
   emit: (e: RunEvent) => void;
   nodeId: string;
+  orgId?: string;
+  runId?: string;
+}
+
+function usageFromUnknown(raw: unknown, extra?: Partial<UsageInfo>): UsageInfo {
+  const found = { costUsd: undefined as number | undefined, tokensIn: undefined as number | undefined, tokensOut: undefined as number | undefined };
+  const walk = (v: unknown, depth: number) => {
+    if (depth > 6 || !v || typeof v !== "object") return;
+    const o = v as Record<string, unknown>;
+    if (found.costUsd == null) {
+      const cost = o.cost ?? o.costUsd ?? o.total_cost;
+      if (typeof cost === "number" && Number.isFinite(cost) && cost > 0)
+        found.costUsd = cost;
+    }
+    if (found.tokensIn == null) {
+      const n = o.prompt_tokens ?? o.inputTokens ?? o.tokensIn;
+      if (typeof n === "number") found.tokensIn = n;
+    }
+    if (found.tokensOut == null) {
+      const n = o.completion_tokens ?? o.outputTokens ?? o.tokensOut;
+      if (typeof n === "number") found.tokensOut = n;
+    }
+    for (const key of ["usage", "providerMetadata", "openrouter", "responses"]) {
+      const child = o[key];
+      if (Array.isArray(child)) child.forEach((item) => walk(item, depth + 1));
+      else walk(child, depth + 1);
+    }
+  };
+  walk(raw, 0);
+  return { ...found, ...extra };
 }
 
 export interface NodeResult {
@@ -134,16 +164,16 @@ export async function runNode(
       const text = await result.text;
       const u = await result.usage;
       const meta = await result.providerMetadata;
-      // OpenRouter reports cost via provider metadata (openrouter.usage.cost)
-      const orUsage = (
-        meta?.openrouter as { usage?: { cost?: number } } | undefined
-      )?.usage;
+      const fromMeta = usageFromUnknown(
+        { usage: u, providerMetadata: meta },
+        { model },
+      );
       return {
         outputs: [{ type: "text", text }],
         usage: {
-          tokensIn: u?.inputTokens,
-          tokensOut: u?.outputTokens,
-          costUsd: orUsage?.cost,
+          tokensIn: fromMeta.tokensIn ?? u?.inputTokens,
+          tokensOut: fromMeta.tokensOut ?? u?.outputTokens,
+          costUsd: fromMeta.costUsd,
           model,
         },
       };
@@ -174,23 +204,26 @@ export async function runNode(
       const size = requireSize(data.size);
       const aspectRatio = size ? undefined : requireAspect(data.aspectRatio);
 
-      const { image } = await generateImage({
+      const generated = await generateImage({
         model: p.gw.imageModel(model) as unknown as ImageModel,
         prompt: images.length ? { text, images } : text,
         maxRetries: 0,
         ...(size ? { size } : {}),
         ...(aspectRatio ? { aspectRatio } : {}),
       });
+      const image = generated.image;
       const art = await saveArtifact(
         image.uint8Array,
         image.mediaType || "image/png",
         "image",
+        ctx.runId,
+        ctx.orgId ?? "",
       );
       return {
         outputs: [
           { type: "image", artifactId: art.id, url: `/api/media/${art.id}` },
         ],
-        usage: { model },
+        usage: usageFromUnknown(generated, { model }),
       };
     }
 
@@ -225,12 +258,23 @@ export async function runNode(
       if (mime.includes("json") || mime.includes("application/json"))
         throw new Error("TTS returned JSON, expected audio");
       const playable = ensurePlayableAudio(buf, mime);
-      const art = await saveArtifact(playable.data, playable.mime, "audio");
+      const art = await saveArtifact(
+        playable.data,
+        playable.mime,
+        "audio",
+        ctx.runId,
+        ctx.orgId ?? "",
+      );
+      const headerCost = Number(res.headers.get("x-openrouter-cost") || "");
       return {
         outputs: [
           { type: "audio", artifactId: art.id, url: `/api/media/${art.id}` },
         ],
-        usage: { model },
+        usage: {
+          model,
+          costUsd:
+            Number.isFinite(headerCost) && headerCost > 0 ? headerCost : undefined,
+        },
       };
     }
 
@@ -250,22 +294,21 @@ export async function runNode(
 
       const p = resolveProvider(provider, settings);
       const model = modelFor(data);
-      const frameImages = firstFrame
-        ? [
-            {
-              image: absoluteUrl(
-                firstFrame.url ?? `/api/media/${firstFrame.artifactId}`,
-              ),
-              frameType: "first_frame" as const,
-            },
-          ]
-        : undefined;
+      let frameImages:
+        | { image: Uint8Array | string; frameType: "first_frame" }[]
+        | undefined;
+      if (firstFrame) {
+        const bytes = await loadImageContent(firstFrame);
+        frameImages = bytes
+          ? [{ image: bytes, frameType: "first_frame" }]
+          : undefined;
+      }
 
       const aspectRatio = requireAspect(data.aspectRatio);
       const resolution = requireSize(data.resolution, "resolution");
       const duration = requireDuration(data.duration);
 
-      const { videos } = await experimental_generateVideo({
+      const generated = await experimental_generateVideo({
         model: p.gw.videoModel(model),
         prompt: prompt || "",
         frameImages,
@@ -273,21 +316,39 @@ export async function runNode(
         ...(resolution ? { resolution } : {}),
         ...(duration ? { duration } : {}),
         download: async ({ url }) => {
-          const r = await fetch(url);
+          const r = await fetch(url, {
+            headers: p.apiKey
+              ? { Authorization: `Bearer ${p.apiKey}` }
+              : undefined,
+          });
+          const data = new Uint8Array(await r.arrayBuffer());
+          const mime = r.headers.get("content-type") || "video/mp4";
+          if (!r.ok || mime.includes("json") || data[0] === 0x7b) {
+            const preview = new TextDecoder().decode(data.slice(0, 180));
+            throw new Error(
+              `Video download failed (${r.status}): ${preview || r.statusText}`,
+            );
+          }
           return {
-            data: new Uint8Array(await r.arrayBuffer()),
-            mediaType: "video/mp4",
+            data,
+            mediaType: mime.includes("video") ? mime : "video/mp4",
           };
         },
       });
-      const v = videos[0];
+      const v = generated.videos[0];
       if (!v) throw new Error("Video generation returned no videos");
-      const art = await saveArtifact(v.uint8Array, "video/mp4", "video");
+      const art = await saveArtifact(
+        v.uint8Array,
+        "video/mp4",
+        "video",
+        ctx.runId,
+        ctx.orgId ?? "",
+      );
       return {
         outputs: [
           { type: "video", artifactId: art.id, url: `/api/media/${art.id}` },
         ],
-        usage: { model },
+        usage: usageFromUnknown(generated, { model }),
       };
     }
 
