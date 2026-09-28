@@ -28,7 +28,7 @@ import {
   type IsValidConnection,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { NODE_TYPES, nodeDef, portAccepts } from "@/lib/nodes";
+import { NODE_TYPES, matchPorts, nodeDef, portAccepts } from "@/lib/nodes";
 import type {
   FlowNodeData,
   GraphDoc,
@@ -53,6 +53,7 @@ import { RunsPanel } from "./RunsPanel";
 import { SettingsModal } from "./SettingsModal";
 import { StatusScreen } from "./StatusScreen";
 import { MiniConsole, type ConsoleLine } from "./MiniConsole";
+import { PublishTemplate } from "./PublishTemplate";
 import { toast } from "./Toast";
 import { readJson } from "@/lib/http";
 import { useTheme } from "./ThemeProvider";
@@ -82,6 +83,7 @@ export function Canvas({
   const [showMini, setShowMini] = useState(false);
   const [showRuns, setShowRuns] = useState(false);
   const [showAssistant, setShowAssistant] = useState(startAssistant);
+  const [showPublish, setShowPublish] = useState(false);
   const [books, setBooks] = useState<
     { id: string; title: string; updatedAt?: string | number }[]
   >([]);
@@ -273,6 +275,7 @@ export function Canvas({
           duration: n.data.duration,
           resolution: n.data.resolution,
           artifactId: n.data.artifactId,
+          skillId: n.data.skillId,
           outputs: n.data.outputs,
           runStatus: n.data.runStatus,
           runError: n.data.runError,
@@ -495,15 +498,82 @@ export function Canvas({
       });
       touch();
     };
+    const onExpandSkill = (e: Event) => {
+      if (readOnly) return;
+      const { nodeId } = (e as CustomEvent).detail as { nodeId: string };
+      const src = nodesRef.current.find((n) => n.id === nodeId);
+      if (!src || src.data.kind !== "skill") return;
+      const stamp = Date.now().toString(36);
+      const llmId = `n${stamp}l`;
+      const imgId = `n${stamp}i`;
+      const llmDef = nodeDef("llm");
+      const imgDef = nodeDef("image.gen");
+      if (!llmDef || !imgDef) return;
+      snapshotNow();
+      setNodes((ns) => [
+        ...ns,
+        {
+          id: llmId,
+          type: "flow",
+          position: { x: src.position.x + 340, y: src.position.y },
+          data: {
+            kind: "llm",
+            label: llmDef.label,
+            model: llmDef.models?.[0]?.id,
+            skillId: src.data.skillId,
+            prompt: "Turn the skill into a concrete image brief for the next node.",
+          },
+        },
+        {
+          id: imgId,
+          type: "flow",
+          position: { x: src.position.x + 680, y: src.position.y },
+          data: {
+            kind: "image.gen",
+            label: imgDef.label,
+            model: imgDef.models?.[0]?.id,
+          },
+        },
+      ]);
+      setEdges((es) => {
+        const next = [...es];
+        const a = matchPorts("skill", "llm");
+        const b = matchPorts("llm", "image.gen");
+        if (a) {
+          next.push({
+            id: `e${stamp}a`,
+            source: nodeId,
+            target: llmId,
+            sourceHandle: a.sourceHandle,
+            targetHandle: a.targetHandle,
+            type: "smoothstep",
+          });
+        }
+        if (b) {
+          next.push({
+            id: `e${stamp}b`,
+            source: llmId,
+            target: imgId,
+            sourceHandle: b.sourceHandle,
+            targetHandle: b.targetHandle,
+            type: "smoothstep",
+          });
+        }
+        return next;
+      });
+      setDirty(true);
+    };
     window.addEventListener("flowbook:update", onUpdate);
     window.addEventListener("flowbook:set-artifact", onArtifact);
     window.addEventListener("flowbook:remove-node", onRemove);
     window.addEventListener("flowbook:duplicate-node", onDuplicate);
+    window.addEventListener("flowbook:expand-skill", onExpandSkill);
     return () => {
       window.removeEventListener("flowbook:update", onUpdate);
       window.removeEventListener("flowbook:set-artifact", onArtifact);
       window.removeEventListener("flowbook:remove-node", onRemove);
       window.removeEventListener("flowbook:duplicate-node", onDuplicate);
+      window.removeEventListener("flowbook:expand-skill", onExpandSkill);
     };
   }, [setNodes, setEdges, touch]);
 
@@ -699,9 +769,9 @@ export function Canvas({
                       ? undefined
                       : (ev.usage ?? n.data.runUsage),
                   streamingText:
-                    ev.status === "done" || ev.status === "error"
-                      ? undefined
-                      : n.data.streamingText,
+                    ev.status === "running" || ev.status === "queued"
+                      ? n.data.streamingText
+                      : undefined,
                 },
               }
             : n,
@@ -1037,6 +1107,7 @@ export function Canvas({
           onSettings={() => settingsApi.setShowSettings(true)}
           assistantOpen={showAssistant}
           onAssistant={() => setShowAssistant((v) => !v)}
+          onPublish={readOnly ? undefined : () => setShowPublish(true)}
           onShare={
             readOnly
               ? undefined
@@ -1270,6 +1341,13 @@ export function Canvas({
               reloadCatalog();
             }}
             onClose={settingsApi.dismissOnboard}
+          />
+        )}
+        {showPublish && (
+          <PublishTemplate
+            graphId={graphId}
+            title={title}
+            onClose={() => setShowPublish(false)}
           />
         )}
       </div>

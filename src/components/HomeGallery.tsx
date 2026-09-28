@@ -165,6 +165,12 @@ export function HomeGallery() {
                 }}
               />
             </label>
+            <Link
+              href="/templates"
+              className="rounded-full border border-line bg-card px-4 py-2 text-[13px] font-medium text-ink transition-all hover:border-line2 hover:bg-white/[0.04]"
+            >
+              Browse templates
+            </Link>
             <button
               onClick={() => create("ai")}
               disabled={!!creating}
@@ -200,6 +206,12 @@ export function HomeGallery() {
               Create a workbook to get a starter pipeline on the canvas.
             </p>
             <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+              <Link
+                href="/templates"
+                className="rounded-full border border-line bg-card px-4 py-2 text-[13px] font-medium text-ink transition-all hover:border-line2"
+              >
+                Browse templates
+              </Link>
               <button
                 onClick={() => create("ai")}
                 disabled={!!creating}

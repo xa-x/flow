@@ -22,7 +22,7 @@ const EXT: Record<string, string> = {
   "video/webm": "webm",
 };
 
-function sniffMime(buf: Uint8Array, fallback: string): string {
+export function sniffMime(buf: Uint8Array, fallback: string): string {
   if (buf.length >= 12) {
     if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47)
       return "image/png";

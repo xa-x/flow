@@ -216,6 +216,39 @@ function ensureSchema(db: Database.Database) {
       created_at integer DEFAULT (unixepoch() * 1000) NOT NULL
     );
     CREATE INDEX IF NOT EXISTS usage_org_idx ON usage_ledger (org_id, created_at);
+    CREATE TABLE IF NOT EXISTS skills (
+      id text PRIMARY KEY NOT NULL,
+      org_id text NOT NULL,
+      source text DEFAULT 'local' NOT NULL,
+      registry_id text,
+      slug text NOT NULL,
+      display_name text NOT NULL,
+      description text DEFAULT '' NOT NULL,
+      body text NOT NULL,
+      installs integer DEFAULT 0 NOT NULL,
+      created_by text,
+      created_at integer DEFAULT (unixepoch() * 1000) NOT NULL,
+      updated_at integer DEFAULT (unixepoch() * 1000) NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS skills_org_slug_idx ON skills (org_id, slug);
+    CREATE INDEX IF NOT EXISTS skills_org_idx ON skills (org_id);
+    CREATE TABLE IF NOT EXISTS templates (
+      id text PRIMARY KEY NOT NULL,
+      org_id text NOT NULL,
+      graph_id text NOT NULL,
+      slug text NOT NULL,
+      title text NOT NULL,
+      description text DEFAULT '' NOT NULL,
+      tags text DEFAULT '[]' NOT NULL,
+      workbook text NOT NULL,
+      clone_count integer DEFAULT 0 NOT NULL,
+      featured integer DEFAULT 0 NOT NULL,
+      published_by text,
+      created_at integer DEFAULT (unixepoch() * 1000) NOT NULL,
+      updated_at integer DEFAULT (unixepoch() * 1000) NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS templates_slug_idx ON templates (slug);
+    CREATE INDEX IF NOT EXISTS templates_featured_idx ON templates (featured, created_at);
   `);
 
   addColumn(db, "graphs", "org_id", "text DEFAULT '' NOT NULL");

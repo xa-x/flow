@@ -17,6 +17,7 @@ export const graphOpSchema = z.discriminatedUnion("op", [
     aspectRatio: z.string().optional(),
     duration: z.number().optional(),
     resolution: z.string().optional(),
+    skillId: z.string().optional(),
     x: z.number().optional(),
     y: z.number().optional(),
   }),
@@ -32,6 +33,7 @@ export const graphOpSchema = z.discriminatedUnion("op", [
     aspectRatio: z.string().optional(),
     duration: z.number().optional(),
     resolution: z.string().optional(),
+    skillId: z.string().optional(),
   }),
   z.object({
     op: z.literal("remove_node"),
@@ -71,6 +73,15 @@ export interface AssistantMessage {
   role: "user" | "assistant";
   content: string;
   mentions?: AssistantMention[];
+}
+
+export function skillCatalogPrompt(
+  skills: { slug: string; displayName: string; description: string }[],
+) {
+  if (!skills.length) return "(none installed)";
+  return skills
+    .map((s) => `- ${s.slug} ("${s.displayName}"): ${s.description}`)
+    .join("\n");
 }
 
 export function nodeCatalogPrompt() {
@@ -143,6 +154,7 @@ export function applyGraphOps(doc: GraphDoc, ops: GraphOp[]): GraphDoc {
           aspectRatio: op.aspectRatio,
           duration: op.duration,
           resolution: op.resolution,
+          skillId: op.skillId,
         },
       });
       addedIds.push(id);
@@ -160,6 +172,7 @@ export function applyGraphOps(doc: GraphDoc, ops: GraphOp[]): GraphDoc {
       if (op.aspectRatio !== undefined) n.data.aspectRatio = op.aspectRatio;
       if (op.duration !== undefined) n.data.duration = op.duration;
       if (op.resolution !== undefined) n.data.resolution = op.resolution;
+      if (op.skillId !== undefined) n.data.skillId = op.skillId;
     } else if (op.op === "remove_node") {
       const id = resolve(op.id);
       const idx = nodes.findIndex((n) => n.id === id);

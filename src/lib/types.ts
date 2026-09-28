@@ -38,6 +38,7 @@ export interface NodeData {
   resolution?: string; // video WxH, e.g. 1920x1080
   temperature?: number;
   artifactId?: string; // uploaded media
+  skillId?: string; // Agent Skill slug or org skill id
   // runtime decoration (not persisted into node defs):
   status?: "idle" | "queued" | "running" | "done" | "error";
   error?: string;
@@ -61,7 +62,14 @@ export interface GraphDoc {
   viewport?: { x: number; y: number; zoom: number };
 }
 
-export type RunStatus = "idle" | "queued" | "running" | "done" | "error";
+export type RunStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "done"
+  | "error"
+  /** deliberately not run — nothing consumes it, or its upstream broke */
+  | "skipped";
 
 /** React Flow node.data as seen by the canvas (adds runtime decoration). */
 export type FlowNodeData = NodeData & {
@@ -85,7 +93,7 @@ export type RunEvent =
   | {
       type: "node";
       nodeId: string;
-      status: "queued" | "running" | "done" | "error";
+      status: "queued" | "running" | "done" | "error" | "skipped";
       outputs?: NodeOutput[];
       error?: string;
       usage?: UsageInfo;

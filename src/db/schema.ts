@@ -265,6 +265,51 @@ export const jobs = sqliteTable(
   (t) => [index("jobs_status_idx").on(t.status, t.runAt)],
 );
 
+export const skills = sqliteTable(
+  "skills",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    source: text("source").notNull().default("local"), // builtin|registry|local
+    registryId: text("registry_id"),
+    slug: text("slug").notNull(),
+    displayName: text("display_name").notNull(),
+    description: text("description").notNull().default(""),
+    body: text("body").notNull(),
+    installs: integer("installs").notNull().default(0),
+    createdBy: text("created_by"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(now),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("skills_org_slug_idx").on(t.orgId, t.slug),
+    index("skills_org_idx").on(t.orgId),
+  ],
+);
+
+export const templates = sqliteTable(
+  "templates",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    graphId: text("graph_id").notNull(),
+    slug: text("slug").notNull(),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    tags: text("tags", { mode: "json" }).notNull().default(sql`'[]'`),
+    workbook: text("workbook", { mode: "json" }).notNull(),
+    cloneCount: integer("clone_count").notNull().default(0),
+    featured: integer("featured").notNull().default(0),
+    publishedBy: text("published_by"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(now),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("templates_slug_idx").on(t.slug),
+    index("templates_featured_idx").on(t.featured, t.createdAt),
+  ],
+);
+
 export const usageLedger = sqliteTable(
   "usage_ledger",
   {
@@ -288,3 +333,5 @@ export type ArtifactRow = typeof artifacts.$inferSelect;
 export type UserRow = typeof users.$inferSelect;
 export type OrgRow = typeof organizations.$inferSelect;
 export type MembershipRow = typeof memberships.$inferSelect;
+export type SkillRow = typeof skills.$inferSelect;
+export type TemplateRow = typeof templates.$inferSelect;

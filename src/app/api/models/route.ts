@@ -11,40 +11,50 @@ export const runtime = "nodejs";
 
 const MODALITIES = new Set<ModelModality>(["text", "image", "audio", "video"]);
 
-/** OpenRouter now tags TTS as "speech" and STT as "transcription". */
-function normalizeModality(raw: unknown): ModelModality | null {
-  if (typeof raw !== "string") return null;
-  const key = raw.toLowerCase();
-  if (key === "speech") return "audio";
-  if (key === "transcription" || key === "embeddings") return null;
-  if (MODALITIES.has(key as ModelModality)) return key as ModelModality;
-  return null;
+/** OpenRouter tags text-to-speech as "speech". */
+const MODALITY_ALIASES: Record<string, ModelModality> = { speech: "audio" };
+
+/** The output modality strings a provider declared, if it declared any. */
+function declaredOutputs(raw: Record<string, unknown>): string[] {
+  const arch = raw.architecture as
+    | { output_modalities?: unknown; modality?: unknown }
+    | undefined;
+  const listed = Array.isArray(arch?.output_modalities)
+    ? arch.output_modalities
+    : [];
+  const fromArch = listed.filter((m): m is string => typeof m === "string");
+  if (fromArch.length) return fromArch;
+
+  // Older shape: "text+image->text".
+  const modality = typeof arch?.modality === "string" ? arch.modality : "";
+  const outSide = modality.split("->")[1] ?? "";
+  return outSide
+    .split("+")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-function outputsOf(raw: Record<string, unknown>, id: string, label: string): ModelModality[] {
-  const arch = raw.architecture;
-  const listed = Array.isArray((arch as { output_modalities?: unknown })?.output_modalities)
-    ? ((arch as { output_modalities: unknown[] }).output_modalities)
-    : [];
-  const fromArch = listed
-    .map(normalizeModality)
-    .filter((x): x is ModelModality => x !== null);
-  if (fromArch.length) return [...new Set(fromArch)];
-
-  const modality =
-    typeof (arch as { modality?: unknown })?.modality === "string"
-      ? (arch as { modality: string }).modality
-      : "";
-  const outSide = (modality.split("->")[1] ?? "").toLowerCase();
-  const fromModality = [
-    outSide.includes("speech") || outSide.includes("audio") ? "audio" : null,
-    outSide.includes("video") ? "video" : null,
-    outSide.includes("image") ? "image" : null,
-    outSide.includes("text") ? "text" : null,
-  ].filter((x): x is ModelModality => x !== null);
-  if (fromModality.length) return [...new Set(fromModality)];
-
-  return inferOutputs(id, label);
+/**
+ * What a model emits. The provider's own declaration always wins; the
+ * id/label heuristic is a fallback for providers that declare nothing.
+ *
+ * Returns empty when everything declared is something no node can consume —
+ * embeddings, transcription, rerank. Those must not fall through to the
+ * heuristic, which defaults to "text" and would file all ~60 of OpenRouter's
+ * into the AI Text picker.
+ */
+function outputsOf(
+  raw: Record<string, unknown>,
+  id: string,
+  label: string,
+): ModelModality[] {
+  const declared = declaredOutputs(raw);
+  if (!declared.length) return inferOutputs(id, label);
+  const mapped = declared
+    .map((m) => m.toLowerCase())
+    .map((m) => MODALITY_ALIASES[m] ?? m)
+    .filter((m): m is ModelModality => MODALITIES.has(m as ModelModality));
+  return [...new Set(mapped)];
 }
 
 function voicesOf(raw: Record<string, unknown>): string[] | undefined {
@@ -85,7 +95,9 @@ export async function POST(req: NextRequest) {
   const results = await Promise.all(
     PROVIDER_SPECS.map(async (spec) => {
       const { baseUrl: base, apiKey: key } = providerCreds(spec.id, settings);
-      if (!base || !key) return [spec.id, []] as const;
+      // OpenRouter serves its catalog publicly, so the picker can be filled
+      // before a key is set. Gateways always need one.
+      if (!base || (!key && spec.id !== "openrouter")) return [spec.id, []] as const;
 
       try {
         const root = base.replace(/\/$/, "");
@@ -98,7 +110,7 @@ export async function POST(req: NextRequest) {
         for (let page = 0; page < 6 && next; page++) {
           const href = next.startsWith("http") ? next : `${root}${next}`;
           const res = await fetch(href, {
-            headers: { Authorization: `Bearer ${key}` },
+            headers: key ? { Authorization: `Bearer ${key}` } : undefined,
             signal: AbortSignal.timeout(15000),
           });
           if (!res.ok) break;
@@ -128,6 +140,8 @@ export async function POST(req: NextRequest) {
               voices: voicesOf(m),
             };
           })
+          // nothing to wire a rerank or embedding model into
+          .filter((m) => m.outputs.length)
           .sort((a, b) => a.id.localeCompare(b.id));
         return [spec.id, list] as const;
       } catch {

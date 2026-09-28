@@ -8,7 +8,12 @@ import type {
   UsageInfo,
 } from "./types";
 import { nodeDef } from "./nodes";
-import { readArtifactBytes, saveArtifact, shrinkReferenceImage } from "./artifacts";
+import {
+  readArtifactBytes,
+  saveArtifact,
+  shrinkReferenceImage,
+  sniffMime,
+} from "./artifacts";
 import { ensurePlayableAudio } from "./audio";
 import { resolveProvider, providerSpec, canonicalProviderId } from "./providers";
 import {
@@ -17,6 +22,7 @@ import {
   requireSize,
   resolveVoice,
 } from "./media-params";
+import { getSkill, type SkillRecord } from "./skills";
 
 /**
  * Node runners — every AI call goes through the provider registry
@@ -50,16 +56,30 @@ function textInputs(inputs: Record<string, NodeOutput[]>) {
   return [];
 }
 
-function promptFrom(inputs: Record<string, NodeOutput[]>, data: NodeData) {
+function promptFrom(
+  inputs: Record<string, NodeOutput[]>,
+  data: NodeData,
+  skillBrief?: string,
+) {
   const incoming = textInputs(inputs)
     .filter((o): o is { type: "text"; text: string } => o.type === "text")
     .map((o) => o.text)
     .join("\n\n");
-  if (data.kind === "tts") return data.prompt?.trim() || incoming;
+  if (data.kind === "tts") {
+    const spoken = data.prompt?.trim() || incoming;
+    if (skillBrief?.trim() && spoken) return `${skillBrief.trim()}\n\n${spoken}`;
+    return spoken;
+  }
   const parts: string[] = [];
+  if (skillBrief?.trim()) parts.push(skillBrief.trim());
   if (data.prompt?.trim()) parts.push(data.prompt.trim());
   if (incoming) parts.push(incoming);
   return parts.join("\n\n");
+}
+
+async function skillFor(data: NodeData, orgId?: string): Promise<SkillRecord | null> {
+  if (!data.skillId) return null;
+  return getSkill(orgId ?? "", data.skillId);
 }
 
 export interface RunCtx {
@@ -98,6 +118,10 @@ function usageFromUnknown(raw: unknown, extra?: Partial<UsageInfo>): UsageInfo {
   return { ...found, ...extra };
 }
 
+/** Usage metadata is a bonus — a provider that omits it must not fail a node. */
+const optional = <T,>(p: PromiseLike<T>) =>
+  Promise.resolve(p).catch(() => undefined);
+
 export interface NodeResult {
   outputs: NodeOutput[];
   usage?: UsageInfo;
@@ -116,6 +140,16 @@ export async function runNode(
     case "note":
       return { outputs: [{ type: "text", text: data.text ?? "" }] };
 
+    case "skill": {
+      if (data.text?.trim()) {
+        return { outputs: [{ type: "text", text: data.text }] };
+      }
+      const skill = await skillFor(data, ctx.orgId);
+      return {
+        outputs: [{ type: "text", text: skill?.instructions ?? "" }],
+      };
+    }
+
     case "image.in":
     case "audio.in":
     case "video.in": {
@@ -129,8 +163,9 @@ export async function runNode(
     }
 
     case "llm": {
+      const skill = await skillFor(data, ctx.orgId);
       const prompt = promptFrom(inputs, data);
-      if (!prompt.trim()) return { outputs: [] };
+      if (!prompt.trim() && !skill?.instructions) return { outputs: [] };
       const provider = providerFor(data);
       const model = modelFor(data);
       const p = resolveProvider(provider, settings);
@@ -139,31 +174,43 @@ export async function runNode(
         | { type: "image"; url?: string; artifactId?: string }
         | undefined;
 
+      const userText = prompt.trim() || "Follow the skill instructions.";
       const content: Array<
         | { type: "text"; text: string }
-        | { type: "file"; data: string; mediaType: "image/png" }
-      > = [{ type: "text", text: prompt }];
+        | { type: "file"; data: Uint8Array | URL; mediaType: string }
+      > = [{ type: "text", text: userText }];
       if (image?.url || image?.artifactId) {
-        content.push({
-          type: "file",
-          data: absoluteUrl(image.url ?? `/api/media/${image.artifactId}`),
-          mediaType: "image/png",
-        });
+        const file = await loadImageFile(image);
+        content.push({ type: "file", ...file });
       }
 
       const result = streamText({
         model: p.gw.chat(model) as LanguageModel,
+        ...(skill?.instructions ? { system: skill.instructions } : {}),
         messages: [{ role: "user", content }],
         temperature: data.temperature,
+        // handled off `fullStream` below; the SDK's default handler would
+        // also dump the whole error object to the server log
+        onError: () => {},
       });
 
-      // stream deltas to the canvas as they arrive
-      for await (const delta of result.textStream) {
-        ctx.emit({ type: "delta", nodeId, text: delta, ts: Date.now() });
+      // Stream deltas to the canvas as they arrive. `fullStream` is used over
+      // `textStream` because it also carries the provider's error parts —
+      // otherwise a failed request only surfaces as the AI SDK's generic
+      // "No output generated" once the result promises are awaited.
+      let text = "";
+      for await (const part of result.fullStream) {
+        if (part.type === "text-delta") {
+          text += part.text;
+          ctx.emit({ type: "delta", nodeId, text: part.text, ts: Date.now() });
+        } else if (part.type === "error") {
+          throw asError(part.error);
+        }
       }
-      const text = await result.text;
-      const u = await result.usage;
-      const meta = await result.providerMetadata;
+      if (!text.trim())
+        throw new Error(`Model "${model}" returned no text.`);
+      const u = await optional(result.usage);
+      const meta = await optional(result.providerMetadata);
       const fromMeta = usageFromUnknown(
         { usage: u, providerMetadata: meta },
         { model },
@@ -180,7 +227,8 @@ export async function runNode(
     }
 
     case "image.gen": {
-      const prompt = promptFrom(inputs, data);
+      const skill = await skillFor(data, ctx.orgId);
+      const prompt = promptFrom(inputs, data, skill?.brief);
       const refs = (inputs.image ?? []).filter(
         (o): o is { type: "image"; url?: string; artifactId?: string } =>
           o.type === "image",
@@ -190,10 +238,7 @@ export async function runNode(
       const model = modelFor(data);
 
       const images: Array<Uint8Array | string> = [];
-      for (const ref of refs) {
-        const content = await loadImageContent(ref);
-        if (content) images.push(content);
-      }
+      for (const ref of refs) images.push(await loadImageBytes(ref));
 
       const text =
         prompt ||
@@ -228,7 +273,8 @@ export async function runNode(
     }
 
     case "tts": {
-      const prompt = promptFrom(inputs, data);
+      const skill = await skillFor(data, ctx.orgId);
+      const prompt = promptFrom(inputs, data, skill?.brief);
       if (!prompt.trim()) return { outputs: [] };
       // The provider instance has no speech model — call the provider's
       // OpenAI-compatible speech endpoint directly.
@@ -279,7 +325,8 @@ export async function runNode(
     }
 
     case "video.gen": {
-      const prompt = promptFrom(inputs, data);
+      const skill = await skillFor(data, ctx.orgId);
+      const prompt = promptFrom(inputs, data, skill?.brief);
       const firstFrame = (inputs.image ?? []).find(
         (o) => o.type === "image",
       ) as { type: "image"; artifactId?: string; url?: string } | undefined;
@@ -298,10 +345,9 @@ export async function runNode(
         | { image: Uint8Array | string; frameType: "first_frame" }[]
         | undefined;
       if (firstFrame) {
-        const bytes = await loadImageContent(firstFrame);
-        frameImages = bytes
-          ? [{ image: bytes, frameType: "first_frame" }]
-          : undefined;
+        frameImages = [
+          { image: await loadImageBytes(firstFrame), frameType: "first_frame" },
+        ];
       }
 
       const aspectRatio = requireAspect(data.aspectRatio);
@@ -373,25 +419,72 @@ export async function runNode(
   }
 }
 
-function absoluteUrl(p?: string) {
-  const path = p ?? "";
-  const base = process.env.FLOWBOOK_URL ?? "http://localhost:3000";
-  return path.startsWith("http") ? path : `${base}${path}`;
+/** The readable part of a provider's error body, ignoring its envelope. */
+function detailOf(body: unknown): string {
+  if (typeof body !== "string" || !body.trim()) return "";
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { message?: unknown };
+      message?: unknown;
+    };
+    const msg = parsed.error?.message ?? parsed.message;
+    return typeof msg === "string" ? msg.trim() : "";
+  } catch {
+    return body.trim().slice(0, 300);
+  }
 }
 
-async function loadImageContent(img: {
+/**
+ * Providers report failures as stream parts rather than thrown errors, and
+ * the useful detail often sits in `responseBody` instead of the message.
+ */
+export function asError(e: unknown): Error {
+  if (!(e instanceof Error))
+    return new Error(typeof e === "string" ? e : JSON.stringify(e));
+  const detail = detailOf((e as { responseBody?: unknown }).responseBody);
+  return detail && !e.message.includes(detail)
+    ? new Error(`${e.message} — ${detail}`)
+    : e;
+}
+
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+};
+
+/**
+ * Image for a model request. Our own artifacts are inlined as bytes: a model
+ * provider cannot reach this origin, and the AI SDK refuses to download
+ * private hosts ("URL with hostname localhost is not allowed").
+ */
+async function loadImageFile(img: {
   url?: string;
   artifactId?: string;
-}): Promise<Uint8Array | string | null> {
-  const id =
-    img.artifactId ?? img.url?.match(/\/api\/media\/([^/?#]+)/)?.[1];
+}): Promise<{ data: Uint8Array | URL; mediaType: string }> {
+  const id = img.artifactId ?? img.url?.match(/\/api\/media\/([^/?#]+)/)?.[1];
   if (id) {
     const hit = await readArtifactBytes(id);
-    if (hit) return shrinkReferenceImage(hit.data);
+    if (hit) {
+      const data = shrinkReferenceImage(hit.data);
+      return { data, mediaType: sniffMime(data, hit.mimeType || "image/png") };
+    }
   }
-  if (img.url?.startsWith("http")) return img.url;
-  if (img.url) return absoluteUrl(img.url);
-  return null;
+  if (img.url?.startsWith("http")) {
+    const ext = new URL(img.url).pathname.split(".").pop()?.toLowerCase() ?? "";
+    return { data: new URL(img.url), mediaType: IMAGE_MIME[ext] ?? "image/png" };
+  }
+  throw new Error(
+    "The upstream image is no longer available — re-upload it and run again.",
+  );
+}
+
+/** Same image, in the shape the image/video generation calls accept. */
+async function loadImageBytes(img: { url?: string; artifactId?: string }) {
+  const { data } = await loadImageFile(img);
+  return data instanceof URL ? data.toString() : data;
 }
 
 export { nodeDef };

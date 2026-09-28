@@ -6,8 +6,10 @@ import { desc, eq } from "drizzle-orm";
 import {
   nodeCatalogPrompt,
   parseAssistantOutput,
+  skillCatalogPrompt,
   type AssistantMessage,
 } from "@/lib/assistant";
+import { listSkills } from "@/lib/skills";
 import { resolveProvider } from "@/lib/providers";
 import type { GraphDoc, ProviderConfig, RunSettings } from "@/lib/types";
 import { requireActor } from "@/lib/auth";
@@ -75,7 +77,7 @@ function graphSummary(graph?: { nodes: unknown[]; edges: unknown[] }) {
   const edges = Array.isArray(doc.edges) ? doc.edges : [];
   const nodeLines = nodes.map((n) => {
     const d = n.data ?? { kind: "?" };
-    return `- id=${n.id} kind=${d.kind} label="${d.label ?? ""}" text=${JSON.stringify(d.text ?? "")} prompt=${JSON.stringify(d.prompt ?? "")} model=${d.model ?? ""} voice=${d.voice ?? ""} size=${d.size ?? ""} aspect=${d.aspectRatio ?? ""} duration=${d.duration ?? ""} resolution=${d.resolution ?? ""} pos=${n.position.x},${n.position.y}`;
+    return `- id=${n.id} kind=${d.kind} label="${d.label ?? ""}" text=${JSON.stringify(d.text ?? "")} prompt=${JSON.stringify(d.prompt ?? "")} skill=${d.skillId ?? ""} model=${d.model ?? ""} voice=${d.voice ?? ""} size=${d.size ?? ""} aspect=${d.aspectRatio ?? ""} duration=${d.duration ?? ""} resolution=${d.resolution ?? ""} pos=${n.position.x},${n.position.y}`;
   });
   const edgeLines = edges.map(
     (e) =>
@@ -168,6 +170,7 @@ export async function POST(req: NextRequest) {
   }
   const vault = await loadOrgSettings(actor.org.id);
   const settings = mergeSettings(vault, settingsFrom(body));
+  const installedSkills = await listSkills(actor.org.id);
 
   let runContext = "(no recent run)";
   if (body.graphId) {
@@ -213,6 +216,9 @@ export async function POST(req: NextRequest) {
 Available node kinds:
 ${nodeCatalogPrompt()}
 
+Installed skills (use skillId = slug on skill / llm / image.gen / video.gen / tts nodes):
+${skillCatalogPrompt(installedSkills)}
+
 Current graph:
 ${graphSummary(body.graph)}
 
@@ -231,6 +237,8 @@ Rules:
   Image (image.in) → AI Image (image.gen, image→image) → Media Out (out.media, out→in)
   Image (image.in) → AI Video (video.gen, out→image) → Media Out (out.media, out→video)
   Text → AI Text (llm, out→in) → Output (out.text)
+  Skill (skill) → AI Text (llm, out→in) → AI Image (image.gen, out→prompt)
+- Prefer a skill node when the user wants a reusable Agent Skill. Set skillId to an installed slug. For image models, keep the full skill off the image prompt — wire Skill → AI Text → AI Image.
 - Edit the existing workbook in place. Do not rebuild from scratch unless the user asks.
 - When the user @mentions a node, update that node (or nodes connected to it) instead of rebuilding the whole graph.
 - Prefer update_node over remove_node + add_node.

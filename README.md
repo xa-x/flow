@@ -47,6 +47,7 @@ runners pick it up automatically.
 | kind        | what it does                                   |
 | ----------- | ---------------------------------------------- |
 | `text`/`note` | raw text / system-style instruction           |
+| `skill` | Agent Skill (`SKILL.md`) — pick from bundled, installed, or [skills.sh](https://www.skills.sh) |
 | `image.in` / `audio.in` / `video.in` | uploads (stored as artifacts) |
 | `llm`       | chat model (vision: attach an upstream image)  |
 | `image.gen` | text-to-image (Seedream, Gemini Image, …)      |
@@ -58,6 +59,27 @@ runners pick it up automatically.
 Ports are typed (`text | image | audio | video`) and connections are
 validated against them. Output nodes classify model output automatically
 (full HTML documents preview live in a sandboxed iframe).
+
+## Skills
+
+A skill is a `SKILL.md` file — YAML frontmatter plus instructions — the same
+format as [skills.sh](https://www.skills.sh). Flowbook ships a small bundled
+set, and you can search/install more from the registry.
+
+- **Skill node** — pick a skill, edit its text, wire it into an AI node's
+  prompt port. "Expand to AI Image" builds Skill → AI Text → AI Image.
+- **Inline picker** — every AI node has a skill dropdown under the prompt.
+  Chat models load the full body as a system message. Image / video / speech
+  nodes get a capped brief so a 10KB skill doesn't blow up a media prompt.
+
+Installed skills are org-scoped. Export and template publish inline the
+skill bodies so a clone still resolves.
+
+## Templates
+
+Publish a workbook from the editor (**Publish**). It lands in the public
+gallery at `/templates`. Cloning creates a private copy in your workspace.
+Uploaded media is stripped; skills stay with the snapshot.
 
 ## Development
 
@@ -92,3 +114,9 @@ npx drizzle-kit push
 | `GET /api/runs/[id]/events` | SSE event stream + reconnect (`?after=`) |
 | `POST /api/mcp` | scoped MCP tools for agents                      |
 | `POST /api/webhooks/[token]` | signed workbook trigger                   |
+| `GET/POST/DELETE /api/skills` | list / author / delete org skills       |
+| `GET /api/skills/search` | search [skills.sh](https://www.skills.sh) |
+| `POST /api/skills/install` | fetch SKILL.md from GitHub and install    |
+| `GET/POST /api/templates` | public gallery + publish a workbook       |
+| `GET/DELETE /api/templates/[slug]` | template detail / unpublish          |
+| `POST /api/templates/[slug]/clone` | clone a template into your org      |

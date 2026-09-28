@@ -44,6 +44,16 @@ export const NODE_TYPES: NodeTypeDef[] = [
     outputs: [{ id: "out", label: "Text", type: "text" }],
   },
   {
+    type: "skill",
+    label: "Skill",
+    description:
+      "Reusable Agent Skill (SKILL.md). Pick one, then wire it into an AI node's text input — or expand it into a Text → Image chain.",
+    category: "input",
+    color: "#a78bfa",
+    inputs: [],
+    outputs: [{ id: "out", label: "Text", type: "text" }],
+  },
+  {
     type: "image.in",
     label: "Image",
     description: "Upload an image",

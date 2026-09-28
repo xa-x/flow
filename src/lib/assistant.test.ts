@@ -14,6 +14,13 @@ describe("matchPorts", () => {
     });
   });
 
+  it("wires skill text into an AI Image prompt port", () => {
+    expect(matchPorts("skill", "image.gen")).toEqual({
+      sourceHandle: "out",
+      targetHandle: "prompt",
+    });
+  });
+
   it("wires video → media out video port", () => {
     expect(matchPorts("video.gen", "out.media")).toEqual({
       sourceHandle: "out",

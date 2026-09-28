@@ -14,6 +14,7 @@ import {
   filterModels,
   groupModels,
   kindForNode,
+  modelName,
   type ModelInfo,
 } from "@/lib/models";
 import { useCatalog } from "@/lib/model-catalog";
@@ -49,6 +50,7 @@ import {
 } from "@/lib/media-params";
 import type { FlowNodeData } from "@/lib/types";
 import { OutputRenderer, downloadOutputs } from "./OutputRenderer";
+import { SkillPicker } from "./SkillPicker";
 import { toast } from "./Toast";
 import { readJson } from "@/lib/http";
 import { fmtUsd } from "@/lib/format";
@@ -69,6 +71,37 @@ const patch = (nodeId: string, p: Record<string, unknown>) =>
   window.dispatchEvent(
     new CustomEvent("flowbook:update", { detail: { nodeId, patch: p } }),
   );
+
+async function saveSkillToLibrary(nodeId: string, d: FlowNodeData) {
+  if (!d.text?.trim() && !d.label?.trim()) {
+    toast("Write some instructions first.", "error");
+    return;
+  }
+  try {
+    const res = await fetch("/api/skills", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        displayName: d.label !== "Skill" ? d.label : undefined,
+        name: d.label !== "Skill" ? d.label : undefined,
+        body: d.text ?? "",
+      }),
+    });
+    const j = await readJson<{
+      skill?: { slug: string; displayName: string; instructions?: string; body?: string };
+      error?: string;
+    }>(res);
+    if (!res.ok || !j.skill) throw new Error(j.error || "Save failed");
+    patch(nodeId, {
+      skillId: j.skill.slug,
+      label: j.skill.displayName,
+      text: j.skill.instructions ?? j.skill.body ?? d.text,
+    });
+    toast(`Saved “${j.skill.displayName}”. It now appears in every skill picker.`, "ok");
+  } catch (e) {
+    toast(e instanceof Error ? e.message : "Save failed", "error");
+  }
+}
 
 export function FlowNode({ id, data, selected }: NodeProps) {
   const d = data as FlowNodeData;
@@ -323,6 +356,49 @@ export function FlowNode({ id, data, selected }: NodeProps) {
           />
         )}
 
+        {d.kind === "skill" && (
+          <>
+            <SkillPicker
+              value={d.skillId}
+              draft={{ displayName: d.label, body: d.text }}
+              onPick={(s) =>
+                patch(id, {
+                  skillId: s?.slug,
+                  label: s?.displayName ?? "Skill",
+                  text: s?.instructions ?? s?.body ?? "",
+                })
+              }
+            />
+            <textarea
+              value={d.text ?? ""}
+              onChange={(e) => patch(id, { text: e.target.value })}
+              placeholder="Skill instructions appear here — edit before wiring into an AI node."
+              rows={5}
+              className="nodrag nowheel mb-2 w-full resize-y rounded-md border border-line bg-sunken px-2 py-1.5 text-[12px] leading-relaxed text-ink/85 outline-none transition-colors placeholder:text-faint focus:border-line2"
+            />
+            <div className="mb-2 grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => void saveSkillToLibrary(id, d)}
+                className="nodrag rounded-md border border-line px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-muted transition-colors hover:border-line2 hover:text-ink"
+              >
+                Save to library
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent("flowbook:expand-skill", { detail: { nodeId: id } }),
+                  )
+                }
+                className="nodrag rounded-md border border-line px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-muted transition-colors hover:border-line2 hover:text-ink"
+              >
+                Expand to image
+              </button>
+            </div>
+          </>
+        )}
+
         {(d.kind === "llm" ||
           d.kind === "image.gen" ||
           d.kind === "video.gen" ||
@@ -347,6 +423,17 @@ export function FlowNode({ id, data, selected }: NodeProps) {
             }
             rows={3}
             className="nodrag nowheel mb-2 w-full resize-y rounded-md border border-line bg-sunken px-2 py-1.5 text-[12px] leading-relaxed text-ink/85 outline-none transition-colors placeholder:text-faint focus:border-line2"
+          />
+        )}
+
+        {(d.kind === "llm" ||
+          d.kind === "image.gen" ||
+          d.kind === "video.gen" ||
+          d.kind === "tts") && (
+          <SkillPicker
+            compact
+            value={d.skillId}
+            onPick={(s) => patch(id, { skillId: s?.slug })}
           />
         )}
 
@@ -460,8 +547,8 @@ export function FlowNode({ id, data, selected }: NodeProps) {
                   {groups.map((g) => (
                     <optgroup key={`${g.provider}-${g.label}`} label={g.label}>
                       {g.items.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.label}
+                        <option key={m.id} value={m.id} title={m.id}>
+                          {modelName(m)}
                         </option>
                       ))}
                     </optgroup>
@@ -647,6 +734,12 @@ export function FlowNode({ id, data, selected }: NodeProps) {
             {d.runError}
           </div>
         )}
+
+        {status === "skipped" && (
+          <div className="mt-2 rounded-md border border-dashed border-line px-2.5 py-2 text-[11px] leading-snug text-faint">
+            {d.runError ?? "Skipped."}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -762,7 +855,9 @@ function StatusMark({ status }: { status: string }) {
         ? "var(--color-err)"
         : status === "queued"
           ? "var(--color-live)"
-          : "var(--color-line2)";
+          : status === "skipped"
+            ? "var(--color-faint)"
+            : "var(--color-line2)";
   return (
     <span
       className="fb-dot h-1.5 w-1.5 shrink-0 rounded-full"

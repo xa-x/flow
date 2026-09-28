@@ -33,6 +33,22 @@ describe("portable workbook", () => {
     expect(next.edges).toHaveLength(1);
   });
 
+  it("keeps inlined skills on export", () => {
+    const pack = toPortable(doc, {
+      title: "T",
+      skills: [
+        {
+          slug: "summarize-bullets",
+          displayName: "Summarize",
+          description: "Five bullets",
+          body: "Write five bullets.",
+        },
+      ],
+    });
+    expect(pack.version).toBe(2);
+    expect(pack.skills?.[0].slug).toBe("summarize-bullets");
+  });
+
   it("rejects junk clipboard text", () => {
     expect(parsePortable("not-json")).toBeNull();
     expect(parsePortable(JSON.stringify({ nodes: [] }))).toBeNull();

@@ -213,7 +213,7 @@ export async function callMcpTool(
           ...n,
           data: {
             ...n.data,
-            ...(n.data.kind === "text" || n.data.kind === "note"
+            ...(n.data.kind === "text" || n.data.kind === "note" || n.data.kind === "skill"
               ? { text }
               : { prompt: text }),
           },

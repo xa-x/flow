@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 import type { GraphDoc, NodeOutput, RunEvent, RunSettings, UsageInfo } from "./types";
-import { runNode, providerFor, modelFor } from "./runners";
+import { runNode, providerFor, modelFor, asError } from "./runners";
 import { nodeDef } from "./nodes";
+import { inertNodeIds } from "./graph";
 import { db } from "@/db";
 import { runs, runNodes } from "@/db/schema";
 import { newId } from "./ids";
@@ -206,11 +207,13 @@ export async function* executeGraph(
       await writeNodeOutputToGraph(opts.graphId, nodeId, {
         outputs: result?.outputs,
         runStatus:
-          status === "skipped" || status === "error"
-            ? "error"
-            : status === "running"
-              ? "running"
-              : "done",
+          status === "skipped"
+            ? "skipped"
+            : status === "error"
+              ? "error"
+              : status === "running"
+                ? "running"
+                : "done",
         runError: error ?? null,
         runUsage: result?.usage,
       });
@@ -224,6 +227,7 @@ export async function* executeGraph(
   void persistRun("running");
   const schedule = (async () => {
     const failed = new Set<string>();
+    const skipped = new Set<string>();
     const settled = new Set<string>();
     const pending: string[] = [];
 
@@ -234,6 +238,11 @@ export async function* executeGraph(
       : opts.from && nodes.has(opts.from)
         ? new Set(downstreamIds(opts.from, edges))
         : null;
+
+    // Never spend a generation on a node nobody reads from. Running a single
+    // node is explicit intent, so that node is always allowed.
+    const inert = opts.only ? new Set<string>() : inertNodeIds(graph.nodes, edges);
+    if (opts.from) inert.delete(opts.from);
 
     if (scope) {
       for (const id of scope) inDeg.set(id, 0);
@@ -291,7 +300,7 @@ export async function* executeGraph(
         });
         await persistNode(nodeId, "done", result, undefined, started, node.data);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = asError(err).message;
         failed.add(nodeId);
         state.failedAny = true;
         emit({ type: "node", nodeId, status: "error", error: msg, ts: Date.now() });
@@ -311,22 +320,30 @@ export async function* executeGraph(
       while (pending.length && executing.size < MAX_CONCURRENCY) {
         const id = pending.shift()!;
         if (settled.has(id)) continue;
-        // skip nodes whose upstream failed (only in full-run mode)
-        if (!opts.only) {
-          const up = incoming.get(id) ?? [];
-          if (up.some((s) => failed.has(s))) {
-            settled.add(id);
-            emit({
-              type: "node",
-              nodeId: id,
-              status: "error",
-              error: "skipped: upstream failed",
-              ts: Date.now(),
-            });
-            await persistNode(id, "skipped", undefined, "skipped: upstream failed");
-            release(id);
-            continue;
-          }
+        const up = incoming.get(id) ?? [];
+        const reason = inert.has(id)
+          ? "skipped: nothing is connected to this node's output"
+          : // a broken upstream only skips in full-run mode
+            opts.only
+            ? null
+            : up.some((s) => failed.has(s))
+              ? "skipped: upstream failed"
+              : up.some((s) => skipped.has(s))
+                ? "skipped: upstream was skipped"
+                : null;
+        if (reason) {
+          settled.add(id);
+          skipped.add(id);
+          emit({
+            type: "node",
+            nodeId: id,
+            status: "skipped",
+            error: reason,
+            ts: Date.now(),
+          });
+          await persistNode(id, "skipped", undefined, reason);
+          release(id);
+          continue;
         }
         const p = runOne(id).finally(() => executing.delete(p));
         executing.add(p);

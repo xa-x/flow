@@ -154,7 +154,13 @@ export function RunsPanel({
                     {(nodes[r.id] ?? []).map((n) => (
                       <tr
                         key={n.id}
-                        className={n.status === "error" ? "text-err" : ""}
+                        className={
+                          n.status === "error"
+                            ? "text-err"
+                            : n.status === "skipped"
+                              ? "text-faint"
+                              : ""
+                        }
                       >
                         <td
                           className="max-w-40 truncate py-px"

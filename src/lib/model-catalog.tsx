@@ -26,7 +26,7 @@ export interface ModelCatalog {
 }
 
 const EMPTY: ModelCatalog = { models: {}, updatedAt: 0 };
-const CACHE_KEY = "flowbook.catalog.v5";
+const CACHE_KEY = "flowbook.catalog.v6";
 
 function readCache(): ModelCatalog | null {
   try {

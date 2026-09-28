@@ -4,6 +4,7 @@ import { graphs } from "@/db/schema";
 import { fail, requireActor } from "@/lib/auth";
 import { canEdit } from "@/lib/tenant";
 import { isPortable, remapPortable } from "@/lib/portable";
+import { materializePortableSkills } from "@/lib/skills";
 import { newId } from "@/lib/ids";
 
 export const runtime = "nodejs";
@@ -19,6 +20,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "flowbook workbook JSON required" }, { status: 400 });
     }
     const pack = isPortable(body) ? body : body.workbook;
+    await materializePortableSkills(actor.org.id, actor.user.id, pack.skills);
     const doc = remapPortable(pack);
     const id = newId();
     const [row] = await db

@@ -229,6 +229,11 @@ body {
 .fb-node.st-error {
   border-color: rgba(239, 68, 68, 0.55);
 }
+/* Deliberately not run — recede instead of alarming like an error. */
+.fb-node.st-skipped {
+  opacity: 0.6;
+  border-style: dashed;
+}
 
 @keyframes fb-glow {
   0%,

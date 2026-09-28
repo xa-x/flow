@@ -2,14 +2,22 @@ import { matchPorts, nodeDef } from "./nodes";
 import type { GraphDoc } from "./types";
 
 export const PORTABLE_KIND = "flowbook/workbook";
-export const PORTABLE_VERSION = 1;
+export const PORTABLE_VERSION = 2;
+
+export interface PortableSkill {
+  slug: string;
+  displayName: string;
+  description: string;
+  body: string;
+}
 
 export interface PortableWorkbook {
   kind: typeof PORTABLE_KIND;
-  version: typeof PORTABLE_VERSION;
+  version: number;
   title?: string;
   nodes: GraphDoc["nodes"];
   edges: GraphDoc["edges"];
+  skills?: PortableSkill[];
 }
 
 function stripRuntime(data: GraphDoc["nodes"][number]["data"]) {
@@ -26,7 +34,7 @@ function stripRuntime(data: GraphDoc["nodes"][number]["data"]) {
 
 export function toPortable(
   doc: GraphDoc,
-  opts: { title?: string; nodeIds?: string[] } = {},
+  opts: { title?: string; nodeIds?: string[]; skills?: PortableSkill[] } = {},
 ): PortableWorkbook {
   const allow = opts.nodeIds ? new Set(opts.nodeIds) : null;
   const nodes = doc.nodes
@@ -45,7 +53,30 @@ export function toPortable(
     title: opts.title,
     nodes,
     edges,
+    ...(opts.skills?.length ? { skills: opts.skills } : {}),
   };
+}
+
+/** Drop org-scoped uploads so a published template cannot leak media. */
+export function stripArtifacts(pack: PortableWorkbook): PortableWorkbook {
+  return {
+    ...pack,
+    nodes: pack.nodes.map((n) => {
+      const data = { ...n.data };
+      delete data.artifactId;
+      return { ...n, data };
+    }),
+  };
+}
+
+export function skillIdsIn(doc: { nodes: GraphDoc["nodes"] }) {
+  return [
+    ...new Set(
+      doc.nodes
+        .map((n) => n.data.skillId)
+        .filter((id): id is string => typeof id === "string" && !!id.trim()),
+    ),
+  ];
 }
 
 export function isPortable(raw: unknown): raw is PortableWorkbook {

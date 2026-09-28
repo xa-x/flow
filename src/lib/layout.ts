@@ -7,6 +7,7 @@ const GAP_Y = 48;
 
 function estimatedHeight(kind: string) {
   if (kind.startsWith("out.")) return 420;
+  if (kind === "skill") return 280;
   if (kind === "llm" || kind.endsWith(".gen") || kind === "tts") return 340;
   if (kind.endsWith(".in")) return 260;
   return 220;

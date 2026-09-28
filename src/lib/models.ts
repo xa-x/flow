@@ -91,28 +91,75 @@ export const PROVIDER_LABELS: Record<string, string> = {
 /** Sentinel option value for the "Custom model…" entry. */
 export const CUSTOM_MODEL = "__custom__";
 
-export const providerOf = (id: string) => id.split("/")[0] ?? id;
+/**
+ * Vendor slug of a model id. OpenRouter prefixes alias ids with "~"
+ * ("~z-ai/glm-flash-latest"), which is the same vendor as "z-ai" and must not
+ * open a second group.
+ */
+export const providerOf = (id: string) =>
+  (id.split("/")[0] ?? id).replace(/^~/, "");
+
 export const providerLabel = (p: string) => PROVIDER_LABELS[p] ?? p;
 
-/** Bucket a flat model list into provider groups, preserving order. */
+/**
+ * Providers label models "Vendor: Model" ("Z.ai: GLM Flash Latest"). Split it
+ * so a group header can carry the vendor and each option only the model,
+ * rather than repeating the vendor on every row.
+ */
+export function splitModelLabel(label: string): {
+  vendor: string;
+  name: string;
+} {
+  const i = label.indexOf(": ");
+  if (i <= 0) return { vendor: "", name: label };
+  return { vendor: label.slice(0, i).trim(), name: label.slice(i + 2).trim() };
+}
+
+export const modelName = (m: ModelInfo) => splitModelLabel(m.label).name || m.id;
+
+/**
+ * Bucket a flat model list into vendor groups, preserving order.
+ *
+ * Vendor names come from `PROVIDER_LABELS` first, then from the provider's
+ * own labels, which keep up with vendors the table has never heard of. Two
+ * details make the derived path messy: a slug can carry more than one name
+ * ("x-ai" ships both "xAI" and "SpaceXAI"), so it takes the name most of its
+ * models agree on; and one vendor can own several slugs ("meta" and
+ * "meta-llama"), so buckets are keyed by the resolved name rather than the
+ * slug, which would render two identical group headers.
+ */
 export function groupModels(models: ModelInfo[]): {
   provider: string;
   label: string;
   items: ModelInfo[];
 }[] {
-  const order: string[] = [];
-  const buckets = new Map<string, ModelInfo[]>();
+  const votes = new Map<string, Map<string, number>>();
   for (const m of models) {
-    const p = providerOf(m.id);
-    if (!buckets.has(p)) {
-      buckets.set(p, []);
-      order.push(p);
-    }
-    buckets.get(p)!.push(m);
+    const vendor = splitModelLabel(m.label).vendor;
+    if (!vendor) continue;
+    const slug = providerOf(m.id);
+    const tally = votes.get(slug) ?? new Map<string, number>();
+    tally.set(vendor, (tally.get(vendor) ?? 0) + 1);
+    votes.set(slug, tally);
   }
-  return order.map((provider) => ({
-    provider,
-    label: providerLabel(provider),
-    items: buckets.get(provider)!,
-  }));
+  const labelFor = (id: string) => {
+    const slug = providerOf(id);
+    if (PROVIDER_LABELS[slug]) return PROVIDER_LABELS[slug];
+    const ranked = [...(votes.get(slug) ?? [])].sort((a, b) => b[1] - a[1]);
+    return ranked[0]?.[0] ?? slug;
+  };
+
+  const order: string[] = [];
+  const buckets = new Map<string, { provider: string; items: ModelInfo[] }>();
+  for (const m of models) {
+    const label = labelFor(m.id);
+    let hit = buckets.get(label);
+    if (!hit) {
+      hit = { provider: providerOf(m.id), items: [] };
+      buckets.set(label, hit);
+      order.push(label);
+    }
+    hit.items.push(m);
+  }
+  return order.map((label) => ({ label, ...buckets.get(label)! }));
 }
